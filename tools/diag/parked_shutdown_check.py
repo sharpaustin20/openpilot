@@ -12,6 +12,12 @@ for k in ("MaxTimeOffroad", "DisablePowerDown", "ForcePowerDown", "CarBatteryCap
   except OSError:
     print(f"{k}: <unset>")
 
+def untag(o):
+  # swaglog appends type tags to keys, e.g. "pandaStates$a"
+  if isinstance(o, dict):
+    return {k.split("$")[0]: untag(v) for k, v in o.items()}
+  return [untag(v) for v in o] if isinstance(o, list) else o
+
 files = sorted(glob.glob("/data/log/swaglog.*"), key=os.path.getmtime)
 recent, hits = [], []
 for f in files:
@@ -23,7 +29,8 @@ for f in files:
     if "STATUS_PACKET" in line:
       try:
         j = json.loads(line)
-        m = j["msg"] if isinstance(j.get("msg"), dict) else json.loads(j["msg"])
+        j = untag(j)
+        m = j["msg"] if isinstance(j.get("msg"), dict) else untag(json.loads(j["msg"]))
         ds, ps = m.get("deviceState", {}).get("deviceState", {}), m.get("peripheralState", {})
         recent.append(f'{j.get("created", 0):.0f} V={ps.get("voltage")}mV cap={ds.get("carBatteryCapacityUwh")}uWh '
                       f'used={ds.get("offroadPowerUsageUwh")}uWh draw={ds.get("powerDrawW")}W started={ds.get("started")}')
