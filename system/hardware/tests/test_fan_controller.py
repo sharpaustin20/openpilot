@@ -1,6 +1,6 @@
 import pytest
 
-from openpilot.system.hardware.fan_controller import FanController, MANUAL_HOT_TEMP, MANUAL_HOT_HYST
+from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING
 
 ALL_CONTROLLERS = [FanController]
@@ -67,7 +67,8 @@ class TestManualFan:
     controller = patched_controller(mocker, FanController)
     for _ in range(100):
       out = controller.update(50, ignition, level)
-    assert out == level
+    # Auto runs 0% offroad when cool, and has a 30% floor onroad
+    assert out == (max(level, 30) if ignition else level)
 
   def test_manual_full_offroad(self, mocker):
     controller = patched_controller(mocker, FanController)
@@ -83,14 +84,14 @@ class TestManualFan:
       assert m >= s
     assert manual.update(100, ignition, 0) >= 90
 
-  def test_hot_hysteresis(self, mocker):
-    controller = patched_controller(mocker, FanController)
-    for _ in range(200):
-      controller.update(95, True, 20)
-    assert controller.update(MANUAL_HOT_TEMP - 1, True, 20) > 20
-    for _ in range(5):
-      out = controller.update(MANUAL_HOT_TEMP - MANUAL_HOT_HYST - 1, True, 20)
-    assert out == 20
+  @pytest.mark.parametrize("level", [0, 20, 40, 60, 80, 100])
+  @pytest.mark.parametrize("ignition", [True, False])
+  def test_follows_auto_when_faster(self, mocker, level, ignition):
+    stock = patched_controller(mocker, FanController)
+    manual = patched_controller(mocker, FanController)
+    for t in [40, 60, 70, 80, 85, 90, 95, 85, 70, 50]:
+      for _ in range(50):
+        assert manual.update(t, ignition, level) == max(level, stock.update(t, ignition))
 
 
 class TestTestingFan:

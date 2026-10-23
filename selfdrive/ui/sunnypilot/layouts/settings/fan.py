@@ -85,9 +85,9 @@ class FanLayout(Widget):
       title=lambda: tr("Fan Mode"),
       description=lambda: tr("Auto runs the stock fan logic, without the stock 30% limit while the car is off. " +
                              "Auto (testing) is a more aggressive curve: 0% at 40°C rising to 100% at 90°C, " +
-                             "never slower than Auto. A manual level is used onroad and offroad.<br>" +
-                             "Stock protections still win: once the device is hot the fan never runs slower " +
-                             "than Auto would, and it goes to 100% if the device overheats."),
+                             "never slower than Auto. A manual level is used onroad and offroad, " +
+                             "but whenever Auto would run the fan faster, the fan follows Auto instead.<br>" +
+                             "The fan goes to 100% if the device overheats."),
       action_item=self._mode_control,
       inline=True,
     )
@@ -122,7 +122,7 @@ class FanLayout(Widget):
     commanded = ds.fanSpeedPercentDesired
     mode = FAN_MODE_OPTIONS[self._mode_control.current_value]
     if mode >= 0 and commanded > mode:
-      return f"{commanded} % " + tr("(raised: hot)")
+      return f"{commanded} % " + tr("(following Auto)")
     return f"{commanded} %"
 
   def _actual_text(self) -> str:
