@@ -6,7 +6,8 @@ See the LICENSE.md file in the root directory for more details.
 """
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, MANUAL_FAN_LEVELS, read_fan_mode, write_fan_mode
+from openpilot.system.hardware.fan_controller import MANUAL_ONROAD_MIN
+from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING, FAN_MODES, read_fan_mode, write_fan_mode
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.sunnypilot.widgets.list_view import ListItemSP
@@ -16,8 +17,8 @@ from openpilot.system.ui.widgets.list_view import ItemAction, text_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 import pyray as rl
 
-# option index -> fan mode: 0 is Auto, then each manual level
-FAN_MODE_OPTIONS = [FAN_MODE_AUTO, *MANUAL_FAN_LEVELS]
+# option index -> fan mode: Auto, Auto (testing), then each manual level
+FAN_MODE_OPTIONS = list(FAN_MODES)
 
 THERMAL_STATUS_NAMES = {
   "ok": "OK",
@@ -54,7 +55,11 @@ class FanModeControl(OptionControlSP):
   @staticmethod
   def _label(idx: int) -> str:
     mode = FAN_MODE_OPTIONS[idx]
-    return tr("Auto") if mode == FAN_MODE_AUTO else f"{mode} %"
+    if mode == FAN_MODE_AUTO:
+      return tr("Auto")
+    if mode == FAN_MODE_AUTO_TESTING:
+      return tr("Auto (testing)")
+    return f"{mode} %"
 
   def set_value(self, value: int):
     if not (self.min_value <= value <= self.max_value) or value == self.current_value:
@@ -79,10 +84,11 @@ class FanLayout(Widget):
     self._mode_control = FanModeControl()
     self._mode = ListItemSP(
       title=lambda: tr("Fan Mode"),
-      description=lambda: tr("Auto runs the stock fan logic. A manual level is used onroad and offroad, " +
-                             "and lifts the 30% offroad limit.<br>Stock protections still win: once the " +
-                             "device is hot the fan never runs slower than Auto would, and it goes to 100% " +
-                             "if the device overheats."),
+      description=lambda: tr("Auto runs the stock fan logic, without the stock 30% limit while the car is off. " +
+                             "Auto (testing) is a more aggressive curve: 0% at 40°C rising to 100% at 90°C, " +
+                             "never slower than Auto. A manual level is used onroad and offroad (minimum 30% while " +
+                             "driving), but whenever Auto would run the fan faster, the fan follows Auto instead.<br>" +
+                             "The fan goes to 100% if the device overheats."),
       action_item=self._mode_control,
       inline=True,
     )
@@ -116,8 +122,10 @@ class FanLayout(Widget):
       return "--"
     commanded = ds.fanSpeedPercentDesired
     mode = FAN_MODE_OPTIONS[self._mode_control.current_value]
-    if mode != FAN_MODE_AUTO and commanded > mode:
-      return f"{commanded} % " + tr("(raised: hot)")
+    if mode >= 0 and commanded > mode:
+      if ui_state.ignition and commanded == MANUAL_ONROAD_MIN:
+        return f"{commanded} % " + tr("(driving minimum)")
+      return f"{commanded} % " + tr("(following Auto)")
     return f"{commanded} %"
 
   def _actual_text(self) -> str:
