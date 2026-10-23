@@ -164,7 +164,9 @@ class CarState(CarStateBase, CarStateExt):
     # these cars are identified by an ACC_TYPE value of 2.
     # TODO: it is possible to avoid the lockout and gain stop and go if you
     # send your own ACC_CONTROL msg on startup with ACC_TYPE set to 1
-    if (self.CP.carFingerprint not in TSS2_CAR and self.CP.carFingerprint not in UNSUPPORTED_DSU_CAR) or \
+    # with a smartDSU/radar filter, a Camry sending ACC_TYPE 2 keeps the stock low speed lockout, so don't fault on it
+    sdsu_acc_type_2 = bool(self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU) and self.smart_dsu_acc_type == 2
+    if (self.CP.carFingerprint not in TSS2_CAR and self.CP.carFingerprint not in UNSUPPORTED_DSU_CAR and not sdsu_acc_type_2) or \
        (self.CP.carFingerprint in TSS2_CAR and self.acc_type == 1):
       if self.CP.openpilotLongitudinalControl:
         ret.accFaulted = ret.accFaulted or cp.vl["PCM_CRUISE_2"]["LOW_SPEED_LOCKOUT"] == 2

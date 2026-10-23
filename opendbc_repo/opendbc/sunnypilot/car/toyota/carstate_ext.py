@@ -30,6 +30,9 @@ class CarStateExt:
     self.CP_SP = CP_SP
 
     self.acc_type = 1
+    # 2018-20 Camry 4cyl L/LE/SE have no full-speed range ACC. Their PCM sets TEMP_ACC_FAULTED and ignores SET
+    # when ACC_CONTROL reports ACC_TYPE 1, so keep the stock radar's type 2 when a smartDSU/radar filter is used.
+    self.smart_dsu_acc_type = 2 if CP.carFingerprint == "TOYOTA_CAMRY" else 1
     self.zss_compute = False
     self.zss_cruise_active_last = False
     self.zss_angle_offset = 0.
@@ -135,7 +138,7 @@ class CarStateExt:
     cp_cam = can_parsers[Bus.cam]
 
     if self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU:
-      self.acc_type = 1
+      self.acc_type = self.smart_dsu_acc_type
 
     if self.CP_SP.enableGasInterceptor:
       gas = (cp.vl["GAS_SENSOR"]["INTERCEPTOR_GAS"] + cp.vl["GAS_SENSOR"]["INTERCEPTOR_GAS2"]) // 2
