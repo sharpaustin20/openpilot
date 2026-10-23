@@ -23,6 +23,7 @@ from openpilot.system.statsd import statlog
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
+from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, read_fan_mode
 from openpilot.system.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -268,7 +269,10 @@ def hardware_thread(end_event, hw_queue) -> None:
     all_comp_temp = all_temp_filter.update(max(temp_sources))
     msg.deviceState.maxTempC = all_comp_temp
 
-    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"])
+    # Auto (default, also on any missing/invalid setting) is the stock fan logic
+    fan_mode = read_fan_mode()
+    manual_fan_level = None if fan_mode == FAN_MODE_AUTO else fan_mode
+    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], manual_fan_level)
 
     is_offroad_for_5_min = (started_ts is None) and ((not started_seen) or (off_ts is None) or (time.monotonic() - off_ts > 60 * 5))
     if is_offroad_for_5_min and offroad_comp_temp > OFFROAD_DANGER_TEMP:
@@ -325,6 +329,10 @@ def hardware_thread(end_event, hw_queue) -> None:
     set_offroad_alert_if_changed("Offroad_TemperatureTooHigh", show_alert, extra_text=extra_text)
 
     if show_alert:
+      msg.deviceState.fanSpeedPercentDesired = 100
+
+    # manual fan mode: full fan in any overheated/critical band, onroad or offroad
+    if manual_fan_level is not None and thermal_status >= ThermalStatus.overheated:
       msg.deviceState.fanSpeedPercentDesired = 100
 
     # Handle offroad/onroad transition
