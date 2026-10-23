@@ -1,6 +1,7 @@
 import pytest
 
-from openpilot.system.hardware.fan_controller import FanController
+from openpilot.system.hardware.fan_controller import FanController, MANUAL_HOT_TEMP, MANUAL_HOT_HYST
+from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING
 
 ALL_CONTROLLERS = [FanController]
 
@@ -24,10 +25,10 @@ class TestFanController:
     assert controller.update(100, True) >= 70
 
   @pytest.mark.parametrize("controller_class", ALL_CONTROLLERS)
-  def test_offroad_limits(self, mocker, controller_class):
+  def test_offroad_no_cap(self, mocker, controller_class):
     controller = patched_controller(mocker, controller_class)
-    self.wind_up(controller)
-    assert controller.update(100, False) <= 30
+    self.wind_up(controller, False)
+    assert controller.update(100, False) >= 90
 
   @pytest.mark.parametrize("controller_class", ALL_CONTROLLERS)
   def test_no_fan_wear(self, mocker, controller_class):
@@ -58,7 +59,7 @@ class TestManualFan:
     for ignition in (True, False):
       for t in temps:
         for _ in range(20):
-          assert auto.update(t, ignition, None) == stock.update(t, ignition)
+          assert auto.update(t, ignition, FAN_MODE_AUTO) == stock.update(t, ignition)
 
   @pytest.mark.parametrize("level", [0, 20, 40, 60, 80, 100])
   @pytest.mark.parametrize("ignition", [True, False])
@@ -68,7 +69,7 @@ class TestManualFan:
       out = controller.update(50, ignition, level)
     assert out == level
 
-  def test_manual_overrides_offroad_cap(self, mocker):
+  def test_manual_full_offroad(self, mocker):
     controller = patched_controller(mocker, FanController)
     assert controller.update(50, False, 100) == 100
 
@@ -80,10 +81,9 @@ class TestManualFan:
       s = stock.update(100, ignition)
       m = manual.update(100, ignition, 0)
       assert m >= s
-    assert manual.update(100, ignition, 0) == (100 if ignition else 30)
+    assert manual.update(100, ignition, 0) >= 90
 
   def test_hot_hysteresis(self, mocker):
-    from openpilot.system.hardware.fan_controller import MANUAL_HOT_TEMP, MANUAL_HOT_HYST
     controller = patched_controller(mocker, FanController)
     for _ in range(200):
       controller.update(95, True, 20)
@@ -91,3 +91,22 @@ class TestManualFan:
     for _ in range(5):
       out = controller.update(MANUAL_HOT_TEMP - MANUAL_HOT_HYST - 1, True, 20)
     assert out == 20
+
+
+class TestTestingFan:
+  @pytest.mark.parametrize("temp,expected", [(30, 0), (40, 0), (65, 50), (80, 80), (90, 100), (100, 100)])
+  def test_curve_offroad(self, mocker, temp, expected):
+    controller = patched_controller(mocker, FanController)
+    assert controller.update(temp, False, FAN_MODE_AUTO_TESTING) == expected
+
+  def test_onroad_floor(self, mocker):
+    controller = patched_controller(mocker, FanController)
+    assert controller.update(40, True, FAN_MODE_AUTO_TESTING) == 30
+
+  @pytest.mark.parametrize("ignition", [True, False])
+  def test_never_below_stock(self, mocker, ignition):
+    stock = patched_controller(mocker, FanController)
+    testing = patched_controller(mocker, FanController)
+    for t in [30, 50, 70, 85, 95, 105, 110, 90, 60]:
+      for _ in range(200):
+        assert testing.update(t, ignition, FAN_MODE_AUTO_TESTING) >= stock.update(t, ignition)

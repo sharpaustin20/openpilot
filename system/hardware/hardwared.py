@@ -269,10 +269,9 @@ def hardware_thread(end_event, hw_queue) -> None:
     all_comp_temp = all_temp_filter.update(max(temp_sources))
     msg.deviceState.maxTempC = all_comp_temp
 
-    # Auto (default, also on any missing/invalid setting) is the stock fan logic
+    # Auto (default, also on any missing/invalid setting) is the stock fan logic without the offroad cap
     fan_mode = read_fan_mode()
-    manual_fan_level = None if fan_mode == FAN_MODE_AUTO else fan_mode
-    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], manual_fan_level)
+    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], fan_mode)
 
     is_offroad_for_5_min = (started_ts is None) and ((not started_seen) or (off_ts is None) or (time.monotonic() - off_ts > 60 * 5))
     if is_offroad_for_5_min and offroad_comp_temp > OFFROAD_DANGER_TEMP:
@@ -331,8 +330,8 @@ def hardware_thread(end_event, hw_queue) -> None:
     if show_alert:
       msg.deviceState.fanSpeedPercentDesired = 100
 
-    # manual fan mode: full fan in any overheated/critical band, onroad or offroad
-    if manual_fan_level is not None and thermal_status >= ThermalStatus.overheated:
+    # testing/manual fan modes: full fan in any overheated/critical band, onroad or offroad
+    if fan_mode != FAN_MODE_AUTO and thermal_status >= ThermalStatus.overheated:
       msg.deviceState.fanSpeedPercentDesired = 100
 
     # Handle offroad/onroad transition
