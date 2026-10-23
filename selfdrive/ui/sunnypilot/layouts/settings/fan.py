@@ -6,6 +6,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.system.hardware.fan_controller import MANUAL_ONROAD_MIN
 from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING, FAN_MODES, read_fan_mode, write_fan_mode
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -85,8 +86,8 @@ class FanLayout(Widget):
       title=lambda: tr("Fan Mode"),
       description=lambda: tr("Auto runs the stock fan logic, without the stock 30% limit while the car is off. " +
                              "Auto (testing) is a more aggressive curve: 0% at 40°C rising to 100% at 90°C, " +
-                             "never slower than Auto. A manual level is used onroad and offroad, " +
-                             "but whenever Auto would run the fan faster, the fan follows Auto instead.<br>" +
+                             "never slower than Auto. A manual level is used onroad and offroad (minimum 30% while " +
+                             "driving), but whenever Auto would run the fan faster, the fan follows Auto instead.<br>" +
                              "The fan goes to 100% if the device overheats."),
       action_item=self._mode_control,
       inline=True,
@@ -122,6 +123,8 @@ class FanLayout(Widget):
     commanded = ds.fanSpeedPercentDesired
     mode = FAN_MODE_OPTIONS[self._mode_control.current_value]
     if mode >= 0 and commanded > mode:
+      if ui_state.ignition and commanded == MANUAL_ONROAD_MIN:
+        return f"{commanded} % " + tr("(driving minimum)")
       return f"{commanded} % " + tr("(following Auto)")
     return f"{commanded} %"
 

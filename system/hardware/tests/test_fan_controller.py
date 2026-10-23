@@ -1,6 +1,6 @@
 import pytest
 
-from openpilot.system.hardware.fan_controller import FanController
+from openpilot.system.hardware.fan_controller import FanController, MANUAL_ONROAD_MIN
 from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING
 
 ALL_CONTROLLERS = [FanController]
@@ -67,8 +67,14 @@ class TestManualFan:
     controller = patched_controller(mocker, FanController)
     for _ in range(100):
       out = controller.update(50, ignition, level)
-    # Auto runs 0% offroad when cool, and has a 30% floor onroad
-    assert out == (max(level, 30) if ignition else level)
+    # manual levels have a 30% minimum while driving
+    assert out == (max(level, MANUAL_ONROAD_MIN) if ignition else level)
+
+  def test_manual_onroad_min(self, mocker):
+    assert MANUAL_ONROAD_MIN == 30
+    controller = patched_controller(mocker, FanController)
+    assert controller.update(20, True, 0) == 30
+    assert controller.update(20, False, 0) == 0
 
   def test_manual_full_offroad(self, mocker):
     controller = patched_controller(mocker, FanController)
@@ -91,7 +97,8 @@ class TestManualFan:
     manual = patched_controller(mocker, FanController)
     for t in [40, 60, 70, 80, 85, 90, 95, 85, 70, 50]:
       for _ in range(50):
-        assert manual.update(t, ignition, level) == max(level, stock.update(t, ignition))
+        floor = max(level, MANUAL_ONROAD_MIN) if ignition else level
+        assert manual.update(t, ignition, level) == max(floor, stock.update(t, ignition))
 
 
 class TestTestingFan:

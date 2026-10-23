@@ -13,6 +13,9 @@ OFFSET = 0 if HARDWARE.get_device_type() == "mici" else 5
 TESTING_CURVE_TEMPS = [40.0, 90.0]
 TESTING_CURVE_SPEEDS = [0, 100]
 
+# manual levels: minimum fan while driving (ignition on)
+MANUAL_ONROAD_MIN = 30
+
 
 class FanController:
   def __init__(self, rate: int) -> None:
@@ -41,4 +44,7 @@ class FanController:
       return stock
 
     # manual level, but never slower than Auto would run, so heat is handled before it overheats
-    return max(int(np.clip(fan_mode, 0, 100)), stock)
+    level = int(np.clip(fan_mode, 0, 100))
+    if ignition:
+      level = max(level, MANUAL_ONROAD_MIN)
+    return max(level, stock)
