@@ -71,8 +71,8 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
 
 
 # Camry: aggressive follows the driver's own profile (measured from manual drives), closer in town
-AGGRESSIVE_T_FOLLOW_BP = [17.9, 26.8]  # m/s, 40 mph and 60 mph
-AGGRESSIVE_T_FOLLOW_V = [1.0, 1.45]
+AGGRESSIVE_T_FOLLOW_BP = [15.6, 17.9, 26.8]  # m/s, 35 / 40 / 60 mph
+AGGRESSIVE_T_FOLLOW_V = [0.8, 1.0, 1.45]
 
 def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, v_ego=0.0):
   if personality==log.LongitudinalPersonality.relaxed:
