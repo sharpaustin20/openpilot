@@ -317,14 +317,18 @@ def run_jobs(jobs, names):
 
 
 GATE_MODES = {"personalized": AGG, "standard": log.LongitudinalPersonality.standard, "relaxed": log.LongitudinalPersonality.relaxed}
+# FCW frames in a scenario that already warns scale with the gap (a 0.05 s closer table gives a frame or two more in a
+# 5 m/s2 stop), so a warning where the current settings had none, or more than 10% + 1 frames more, fails; less is noise
+FCW_TOL = 0.10
 
 
 def gate(cur_path, cand_path, modes=("personalized",)):
   """--gate CURRENT CANDIDATE [--modes all] (two settings files): the full scenario set for both, in the Personalized
   slot and, with --modes all, in Standard and Relaxed too (glide and soft plan act there as well). PASS unless in some
-  scenario of some mode the candidate has more FCW frames or a crash the current doesn't, brakes harder than -2.5
-  where the current didn't, gets under HARD_MIN_GAP_S where the current didn't, or misses its steady gap. Prints a
-  verdict line and a GATE_JSON line (read by suggest_long.py before a suggestion is offered or applied)."""
+  scenario of some mode the candidate warns where the current doesn't (or clearly more, see FCW_TOL), crashes where
+  the current doesn't, brakes harder than -2.5 where the current didn't, gets under HARD_MIN_GAP_S where the current
+  didn't, or misses its steady gap. Prints a verdict line and a GATE_JSON line (read by suggest_long.py before a
+  suggestion is offered or applied)."""
   import json
   names = []
   for mode in modes:
@@ -341,7 +345,7 @@ def gate(cur_path, cand_path, modes=("personalized",)):
       b = cur.get(k)
       if b is None:
         continue
-      if m["fcw"] > b["fcw"]:
+      if m["fcw"] > b["fcw"] and (b["fcw"] == 0 or m["fcw"] > b["fcw"] * (1.0 + FCW_TOL) + 1):
         worse.append(f"{mode}, {k}: FCW {m['fcw']} > {b['fcw']}")
       if m["crash"] and not b["crash"]:
         worse.append(f"{mode}, {k}: crash")
