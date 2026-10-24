@@ -294,7 +294,7 @@ class Tici(HardwareBase):
     except Exception:
       return 0
 
-  def set_power_save(self, powersave_enabled, keep_all_cores=False):
+  def set_power_save(self, powersave_enabled):
     # amplifier, 100mW at idle
     if self.amplifier is not None:
       self.amplifier.set_global_shutdown(amp_disabled=powersave_enabled)
@@ -303,21 +303,17 @@ class Tici(HardwareBase):
 
     # *** CPU config ***
 
-    # power save with keep_all_cores (car-off setting): big cluster stays online,
-    # both clusters on ondemand and capped at the onroad 1689 MHz
-    keep_big = powersave_enabled and keep_all_cores
-
     # offline big cluster
     for i in range(4, 8):
-      val = '0' if powersave_enabled and not keep_big else '1'
+      val = '0' if powersave_enabled else '1'
       sudo_write(val, f'/sys/devices/system/cpu/cpu{i}/online')
 
     for n in ('0', '4'):
-      if powersave_enabled and n == '4' and not keep_big:
+      if powersave_enabled and n == '4':
         continue
       gov = 'ondemand' if powersave_enabled else 'performance'
       sudo_write(gov, f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_governor')
-      if not powersave_enabled or keep_big:
+      if not powersave_enabled:
         # cap max core freq to 1689 Mhz
         sudo_write('1689600', f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_max_freq')
 

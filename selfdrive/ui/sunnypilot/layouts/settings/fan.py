@@ -8,13 +8,12 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.hardware.fan_controller import MANUAL_ONROAD_MIN
 from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING, FAN_MODES, read_fan_mode, write_fan_mode
-from openpilot.system.hardware.offroad_cores import read_offroad_all_cores, write_offroad_all_cores
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.sunnypilot.widgets.list_view import ListItemSP
 from openpilot.system.ui.sunnypilot.widgets.option_control import OptionControlSP, LABEL_WIDTH
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.widgets.list_view import ItemAction, text_item, toggle_item
+from openpilot.system.ui.widgets.list_view import ItemAction, text_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 import pyray as rl
 
@@ -94,19 +93,8 @@ class FanLayout(Widget):
       inline=True,
     )
 
-    self._all_cores = toggle_item(
-      lambda: tr("Use All CPU Cores (Car Off)"),
-      description=lambda: tr("Keep all 8 CPU cores online while the car is off and the screen is asleep, so jobs like " +
-                             "log replays run faster. Cores are capped at 1689 MHz, the same as while driving. Uses more " +
-                             "power and heat while parked. It falls back to the normal 4 cores if the device overheats or " +
-                             "the car battery drops below 12.0 V. The low-voltage and battery shutdowns are unchanged."),
-      initial_state=read_offroad_all_cores(),
-      callback=self._set_all_cores,
-    )
-
     items = [
       self._mode,
-      self._all_cores,
       text_item(lambda: tr("Commanded Fan Speed"), self._commanded_text),
       text_item(lambda: tr("Actual Fan Speed"), self._actual_text),
       text_item(lambda: tr("Thermal Status"), self._thermal_text),
@@ -118,13 +106,6 @@ class FanLayout(Widget):
       text_item(lambda: tr("Modem"), lambda: self._temp(lambda ds: max(ds.modemTempC, default=0.))),
     ]
     return items
-
-  def _set_all_cores(self, enabled: bool):
-    try:
-      write_offroad_all_cores(enabled)
-    except Exception:
-      cloudlog.exception("fan: failed to save all cores setting")
-      self._all_cores.action_item.set_state(read_offroad_all_cores())
 
   @staticmethod
   def _device_state():
@@ -165,5 +146,4 @@ class FanLayout(Widget):
 
   def show_event(self):
     self._mode_control.refresh()
-    self._all_cores.action_item.set_state(read_offroad_all_cores())
     self._scroller.show_event()

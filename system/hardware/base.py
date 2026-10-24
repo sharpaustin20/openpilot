@@ -184,7 +184,7 @@ class HardwareBase(ABC):
   def get_screen_brightness(self):
     return 0
 
-  def set_power_save(self, powersave_enabled, keep_all_cores=False):
+  def set_power_save(self, powersave_enabled):
     pass
 
   def get_gpu_usage_percent(self):
