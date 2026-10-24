@@ -4,10 +4,13 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import time
+
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.hardware.fan_controller import MANUAL_ONROAD_MIN
 from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING, FAN_MODES, read_fan_mode, write_fan_mode
+from openpilot.system.hardware.test_job import CPU_ONLINE_PATH, test_job_active
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.sunnypilot.widgets.list_view import ListItemSP
@@ -78,6 +81,9 @@ def _fmt_temp(temp: float) -> str:
 class FanLayout(Widget):
   def __init__(self):
     super().__init__()
+    self._cpu_status_ts = 0.
+    self._test_job_running = False
+    self._cores_online = "--"
     self._scroller = Scroller(self._initialize_items(), line_separator=True, spacing=0)
 
   def _initialize_items(self):
@@ -95,6 +101,11 @@ class FanLayout(Widget):
 
     items = [
       self._mode,
+      text_item(lambda: tr("Test Job"), self._test_job_text,
+                description=lambda: tr("Scripts started with system/hardware/test_job.py run with all 8 CPU cores at full speed " +
+                                       "and at least the Auto (testing) fan curve, only while the car is off. Cores drop to " +
+                                       "1689 MHz if the device gets hot, and test job mode turns off below 12.0 V car battery.")),
+      text_item(lambda: tr("CPU Cores Online"), self._cores_text),
       text_item(lambda: tr("Commanded Fan Speed"), self._commanded_text),
       text_item(lambda: tr("Actual Fan Speed"), self._actual_text),
       text_item(lambda: tr("Thermal Status"), self._thermal_text),
@@ -106,6 +117,29 @@ class FanLayout(Widget):
       text_item(lambda: tr("Modem"), lambda: self._temp(lambda ds: max(ds.modemTempC, default=0.))),
     ]
     return items
+
+  def _refresh_cpu_status(self):
+    # file reads, so at most once a second instead of every frame
+    now = time.monotonic()
+    if now - self._cpu_status_ts < 1.0:
+      return
+    self._cpu_status_ts = now
+    self._test_job_running = test_job_active()
+    try:
+      with open(CPU_ONLINE_PATH) as f:
+        self._cores_online = f.read().strip()
+    except Exception:
+      self._cores_online = "--"
+
+  def _test_job_text(self) -> str:
+    self._refresh_cpu_status()
+    if not self._test_job_running:
+      return tr("Not running")
+    return tr("Running") if not ui_state.ignition else tr("Running (paused while driving)")
+
+  def _cores_text(self) -> str:
+    self._refresh_cpu_status()
+    return self._cores_online
 
   @staticmethod
   def _device_state():
