@@ -94,13 +94,17 @@ Personal sunnypilot branch for one car:
    - **Settings** live in `/data/camry_long.json` (not a Params key, as with
      the fan page), read once per drive; only switching Glide or Soft Plan
      off applies mid-drive. Every value is validated and clamped; the gap
-     table can't go below 0.8 s or above 1.75 s. Status for the page in
+     table can't go below 0.8 s or above 1.75 s, and the glide ranges stay
+     inside what the bench has covered: coast decel -0.6 to -0.1 m/s², TTC
+     gate 5-10 s, coast margin 0.05-0.5 s, light braking -1.5 to -0.5 m/s²
+     (the page offers the same choices). Status for the page in
      `/dev/shm/camry_long_state.json`.
    - **Learning** ("Learn After Drives", on by default): `camry_learnd`
      (manager, offroad only) runs `driver_profile.py` + `suggest_long.py`
      through `test_job.py` at lowest priority once the car has been off
      10 min, the battery is above 12.2 V and the device below 60 °C; it is
-     stopped if the car turns on or the device passes 65 °C. It writes only
+     stopped if the car turns on or the device passes 65 °C; a run takes the
+     20 newest unlearned drives, so a backlog is worked off in batches. It writes only
      `/data/camry_long_suggested.json` and `camry_long_learned.json`. The
      page shows each suggested change with its evidence (gas presses,
      brake takeovers, your manual gaps, your coasts), and interventions

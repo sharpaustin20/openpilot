@@ -20,15 +20,15 @@ import pyray as rl
 
 MPH = 2.237
 
-# numeric settings shown as -/+ controls: field -> (choices, label)
+# numeric settings shown as -/+ controls: field -> (choices, label); the choices stay inside camry_personalized.LIMITS
 NUMBER_OPTIONS = {
-  "coast_margin_s": ([round(0.05 * i, 2) for i in range(11)], lambda v: f"{v:.2f} s"),
+  "coast_margin_s": ([round(0.05 * i, 2) for i in range(1, 11)], lambda v: f"{v:.2f} s"),
   "light_width_s": ([round(0.1 + 0.05 * i, 2) for i in range(9)], lambda v: f"{v:.2f} s"),
   "fixed_coast_to_s": ([round(0.8 + 0.05 * i, 2) for i in range(25)], lambda v: f"{v:.2f} s"),
   "fixed_light_to_s": ([round(0.6 + 0.05 * i, 2) for i in range(25)], lambda v: f"{v:.2f} s"),
-  "light_brake": ([round(-1.5 + 0.1 * i, 1) for i in range(13)], lambda v: f"{v:.1f} m/s²"),
-  "min_ttc_s": ([float(i) for i in range(3, 11)], lambda v: f"{v:.0f} s"),
-  "coast_accel": ([round(-0.6 + 0.1 * i, 1) for i in range(7)], lambda v: f"{v:.1f} m/s²"),
+  "light_brake": ([round(-1.5 + 0.1 * i, 1) for i in range(11)], lambda v: f"{v:.1f} m/s²"),
+  "min_ttc_s": ([float(i) for i in range(5, 11)], lambda v: f"{v:.0f} s"),
+  "coast_accel": ([round(-0.6 + 0.1 * i, 1) for i in range(6)], lambda v: f"{v:.1f} m/s²"),
   "soft_distance_factor": ([round(0.1 * i, 1) for i in range(1, 11)], lambda v: f"{v:.1f}"),
 }
 

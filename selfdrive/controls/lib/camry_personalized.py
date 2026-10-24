@@ -81,15 +81,16 @@ class PersonalizedSettings:
   auto_apply: bool = False        # let the learning job apply its suggestions itself (one step each, history kept)
 
 
-# field -> (min, max)
+# field -> (min, max). The glide ranges stay inside what the bench has covered (defaults and the learner's values):
+# coasting always asks for some decel, the TTC gate never drops under 5 s, light braking is never weaker than -0.5.
 LIMITS = {
-  "coast_margin_s": (0.0, 0.5),
+  "coast_margin_s": (0.05, 0.5),
   "light_width_s": (0.1, 0.5),
   "fixed_coast_to_s": (0.8, 2.0),
   "fixed_light_to_s": (HARD_MIN_GAP_S, 1.8),
-  "light_brake": (-1.5, -0.3),
-  "min_ttc_s": (3.0, 10.0),
-  "coast_accel": (-0.6, 0.0),
+  "light_brake": (-1.5, -0.5),
+  "min_ttc_s": (5.0, 10.0),
+  "coast_accel": (-0.6, -0.1),
   "soft_distance_factor": (0.1, 1.0),
 }
 

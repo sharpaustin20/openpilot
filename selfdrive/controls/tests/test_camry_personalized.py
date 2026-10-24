@@ -40,8 +40,10 @@ class TestSettings:
   def test_clamped(self):
     s = parse_settings({"glide": True, "light_brake": -9.0, "min_ttc_s": 0.5, "coast_accel": 2.0, "band": "weird",
                         "coast_margin_s": float("nan"), "fixed_coast_to_s": 1.0, "fixed_light_to_s": 1.5})
-    assert s.glide and s.light_brake == -1.5 and s.min_ttc_s == 3.0 and s.coast_accel == 0.0
+    assert s.glide and s.light_brake == -1.5 and s.min_ttc_s == 5.0 and s.coast_accel == -0.1
     assert s.band == "relative" and s.coast_margin_s == PersonalizedSettings().coast_margin_s
+    loose = parse_settings({"coast_margin_s": 0.0, "light_brake": -0.3, "min_ttc_s": 3.0, "coast_accel": 0.0})
+    assert (loose.coast_margin_s, loose.light_brake, loose.min_ttc_s, loose.coast_accel) == (0.05, -0.5, 5.0, -0.1)   # the loosest allowed
     assert s.fixed_light_to_s < s.fixed_coast_to_s
     assert parse_settings({"glide": 1, "soft_plan": 1}) == PersonalizedSettings()  # a non-bool falls back to the default
 

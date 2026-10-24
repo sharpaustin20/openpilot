@@ -15,6 +15,7 @@ device passes STOP_TEMP_C, or when manager stops this process. It writes /data/c
 /data/camry_long_learned.json; the live settings change only if "Apply Automatically" is on (suggest_long.py then
 applies the same limited step as the page's Apply button and keeps the previous file for Undo).
 """
+import json
 import os
 import signal
 import subprocess
@@ -36,6 +37,7 @@ START_TEMP_C = 60.0
 STOP_TEMP_C = 65.0         # above this the job is stopped so the device can still go onroad (75 C blocks it)
 CHECK_PERIOD = 10.0
 MAX_RUN_S = 30 * 60
+MAX_ROUTES_PER_RUN = 20    # newest first; a backlog is worked off in batches, each recorded when it finishes
 REALDATA = "/data/media/0/realdata"
 
 
@@ -53,8 +55,9 @@ def routes_on_disk(root=REALDATA):
 
 
 def learned_routes(path):
+  """Routes with stats in the history, plus every route a finished run has read ("seen"), so none is re-read."""
   hist = cp.read_json(path) or {}
-  return set(hist.get("routes", {}))
+  return set(hist.get("routes", {})) | set(hist.get("seen", []))
 
 
 class Learnd:
@@ -64,6 +67,7 @@ class Learnd:
     self.off_since = time.monotonic()   # manager starts this process only once the car is off
     self.not_before = 0.0
     self.job = None
+    self.job_routes: list[str] = []
     self.job_started = 0.0
     self.history = os.path.join(os.path.dirname(cp.suggested_path()), "camry_long_learned.json")
     self.stop = False
@@ -104,6 +108,19 @@ class Learnd:
     self.job = None
     self.not_before = time.monotonic() + RETRY_WAIT
 
+  def mark_seen(self, routes):
+    """After a finished run, record its routes in the history so they are not read again (suggest_long only
+    records routes with engaged driving)."""
+    try:
+      hist = cp.read_json(self.history) or {}
+      hist["seen"] = sorted(set(hist.get("seen", [])) | set(routes))[-1000:]
+      tmp = f"{self.history}.tmp"
+      with open(tmp, "w") as f:
+        json.dump(hist, f, indent=1)
+      os.replace(tmp, self.history)
+    except Exception:
+      cloudlog.exception("camry learnd: history")
+
   def start_job(self, routes):
     py = sys.executable
     wrapper = os.path.join(BASEDIR, "system", "hardware", "test_job.py")
@@ -121,6 +138,7 @@ class Learnd:
     cloudlog.info(f"camry learnd: learning from {len(routes)} new route(s)")
     self.job = subprocess.Popen(cmd, env=env, cwd=BASEDIR, preexec_fn=low_priority,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    self.job_routes = sorted(routes)
     self.job_started = time.monotonic()
 
   def step(self):
@@ -136,6 +154,8 @@ class Learnd:
       if rc is not None:
         self.job = None
         cloudlog.info(f"camry learnd: job finished rc={rc}")
+        if rc == 0:
+          self.mark_seen(self.job_routes)
         self.not_before = now + (RETRY_WAIT if rc != 0 else 0)
       elif temp is not None and temp > STOP_TEMP_C:
         self.kill_job(f"device {temp:.0f} C")
@@ -152,11 +172,11 @@ class Learnd:
     temp = self.temp_c()
     if temp is None or temp > START_TEMP_C:
       return
-    new = routes_on_disk() - learned_routes(self.history)
+    new = sorted(routes_on_disk() - learned_routes(self.history))
     if not new:
       self.not_before = now + 5 * 60
       return
-    self.start_job(new)
+    self.start_job(new[-MAX_ROUTES_PER_RUN:])   # newest first, so a run always finishes inside MAX_RUN_S
 
   def run(self):
     while not self.stop:
