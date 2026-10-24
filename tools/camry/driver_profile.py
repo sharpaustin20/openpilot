@@ -1,7 +1,8 @@
 # Read-only: learn Austin's following style from recorded drives.
 # Finds (1) manual following (long control off), (2) gas overrides while engaged, (3) brake takeovers,
 # (4) distance-button / personality changes, (5) coasts: slowing with no pedal pressed behind a lead, followed to
-# their end, (6) how hard sunnypilot asks before the PCM actually brakes (0x3B7 BRAKE_LIGHTS_ACC vs the request).
+# their end, (6) how hard sunnypilot asks before the PCM actually brakes (0x3B7 BRAKE_LIGHTS_ACC vs the request;
+# probe_3b7.py found no such bit on this Camry on 2026-10-24, so (6) stays empty until another signal is found).
 # Prints a short summary; full detail goes to a JSON file (tools/camry/suggest_long.py turns it into suggestions).
 #
 # Run with the car OFF (refuses to start, and stops, if the comma goes onroad):
@@ -90,7 +91,9 @@ def extract_route(args):
           cur["req_a"] = m.carControl.actuators.accel
         elif w == "can":
           for c in m.can:
-            if c.address == 0x3B7 and c.src == 0 and len(c.dat) >= 3:   # ACC brake lights: 1 bit (Motorola 18 -> byte 2, bit 2)
+            # ACC brake lights per the Toyota DBC: 1 bit (Motorola 18 -> byte 2, bit 2). Never set on this Camry
+            # (probe_3b7.py, 2026-10-24: no 0x3B7 bit tracks braking on any bus), kept for when a real signal is found.
+            if c.address == 0x3B7 and c.src == 0 and len(c.dat) >= 3:
               cur["pcm_brake"] = bool(c.dat[2] & 0x04)
         elif w == "selfdriveState":
           sd = m.selfdriveState
@@ -336,6 +339,8 @@ def summary(tot):
   pb = pcm_brake_threshold(tot["pcm_brake"])
   if pb is not None:
     L.append(f"PCM brakes (0x3B7) for requests at or below {pb:.1f} m/s^2 ({sum(sum(v) for v in tot['pcm_brake'].values())} samples)")
+  elif tot["pcm_brake"]:
+    L.append("PCM brake-light bit (0x3B7): never set on this car, so no PCM coast floor (probe_3b7.py 2026-10-24: no bit tracks braking)")
   pc = tot["personality_changes"]
   if pc:
     L.append("distance button changes: " + "; ".join(f"{p['mph']}mph->{p['to']}" for p in pc[:10]))

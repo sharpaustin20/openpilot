@@ -1,22 +1,24 @@
 """
-Camry Personalized profile: takes the Aggressive slot of the distance button when switched on.
+Camry following: the Personalized profile in the Aggressive slot of the distance button, and glide in
+every distance mode.
 
-It has three parts, all set in /data/camry_long.json (the Personalized page) and tuned over time
-from the learning job's suggestions:
-- follow gap: a speed-based t_follow table (long_mpc.py's PERSONALIZED table is the default).
-- glide (option A): the MPC penalizes being too close as much as being too far, so it brakes to
-  win back every bit of gap. Behind a lead in the same lane, glide raises small braking requests to
-  the car's coast decel while the gap is in a coast zone, caps braking in a light zone below it, and
-  passes the MPC output through unchanged below the band, when closing fast, when the lead brakes,
-  right after a cut-in, or for anything that isn't the lead (curves, stops, e2e). It only ever
-  makes a braking request less firm.
-- soft plan (option C1): while glide may act, the MPC's weight on holding the exact distance is
-  lowered, so the plan itself glides. Its one-sided danger-zone penalty is unchanged.
+Everything is set in /data/camry_long.json (the Personalized page) and tuned over time from the
+learning job's suggestions:
+- Personalized (on by default): a speed-based t_follow table (DEFAULT_FOLLOW_* below) for the
+  Aggressive slot; off = stock Aggressive (flat 1.25 s). Standard and Relaxed keep their stock gaps.
+- glide (option A, on by default, every mode): the MPC penalizes being too close as much as being too
+  far, so it brakes to win back every bit of gap. Behind a lead in the same lane, glide raises small
+  braking requests to the car's coast decel while the gap is in a coast zone under the current mode's
+  target, caps braking in a light zone below it, and passes the MPC output through unchanged below the
+  band, when closing fast, when the lead brakes, right after a cut-in, or for anything that isn't the
+  lead (curves, stops, e2e). It only ever makes a braking request less firm.
+- soft plan (option C1, off by default): while glide may act, the MPC's weight on holding the exact
+  distance is lowered, so the plan itself glides. Its one-sided danger-zone penalty is unchanged.
 FCW is computed by the MPC and is untouched by all of it.
 
 Settings live in a file, not Params: this branch is a prebuilt release, so Params keys are compiled
-into params_pyx.so and unknown keys are deleted at boot (same as the fan page). Missing, unreadable
-or invalid settings mean Personalized is off (stock Aggressive); every value is validated and clamped.
+into params_pyx.so and unknown keys are deleted at boot (same as the fan page). A missing, unreadable
+or invalid file means the defaults; every value is validated and clamped.
 Settings are read once when plannerd starts (each drive), so nothing changes mid-drive, except that
 switching glide or soft plan off takes effect within a second.
 """
@@ -59,10 +61,10 @@ BOOLS = ("personalized", "glide", "soft_plan", "learn")
 
 @dataclass
 class PersonalizedSettings:
-  personalized: bool = False      # Personalized takes the Aggressive slot (off = stock Aggressive, flat 1.25 s)
-  follow_bp_mph: tuple = ()       # follow-gap table override (empty = long_mpc.py's PERSONALIZED table)
+  personalized: bool = True       # your gap table in the Aggressive slot (off = stock Aggressive, flat 1.25 s)
+  follow_bp_mph: tuple = ()       # follow-gap table override (empty = the DEFAULT_FOLLOW_* table)
   follow_s: tuple = ()
-  glide: bool = False
+  glide: bool = True              # in every distance mode
   band: str = BAND_RELATIVE
   coast_margin_s: float = 0.2     # relative: coast until the gap is this far under target
   light_width_s: float = 0.25     # relative: width of the light-brake zone below that
@@ -73,7 +75,7 @@ class PersonalizedSettings:
   coast_accel: float = -0.3       # m/s^2, request while coasting (Camry's own coast on flat road)
   soft_plan: bool = False
   soft_distance_factor: float = 0.3  # weight on holding the exact distance while in the glide band (1.0 = stock)
-  learn: bool = False             # run the learning job while parked (writes suggestions only)
+  learn: bool = True              # run the learning job while parked (writes suggestions only)
 
 
 # field -> (min, max)
@@ -345,12 +347,13 @@ class GlideGovernor:
       cloudlog.info(f"camry personalized: switched off mid-drive: {list(off)}")
     self.pending_change = new != self.settings
 
-  def observe(self, v_ego: float, lead, t_follow: float, personalized_active: bool):
-    """lead: radarState.leadOne. Tracks the lead and the safety gates; decides if glide may act this cycle."""
+  def observe(self, v_ego: float, lead, t_follow: float):
+    """lead: radarState.leadOne; t_follow: the current distance mode's target gap. Tracks the lead and the
+    safety gates; decides if glide may act this cycle."""
     s = self.settings
     self._ready = False
     self.active = False
-    if not (personalized_active and (s.glide or s.soft_plan)):
+    if not (s.glide or s.soft_plan):
       self.reset()
       return
     self.t_follow = t_follow
@@ -416,7 +419,7 @@ class GlideGovernor:
     return max(a_target, floor)
 
   def update(self, a_target: float, v_ego: float, lead, t_follow: float, source_is_lead: bool, accel_min: float) -> float:
-    self.observe(v_ego, lead, t_follow, True)
+    self.observe(v_ego, lead, t_follow)
     return self.apply(a_target, source_is_lead, accel_min)
 
   def write_state(self, now: float | None = None):
@@ -472,11 +475,11 @@ class SafeGlide:
     except Exception:
       self._fail("reset")
 
-  def observe(self, v_ego: float, lead, t_follow: float, personalized_active: bool):
+  def observe(self, v_ego: float, lead, t_follow: float):
     if self.failed:
       return
     try:
-      self.governor.observe(v_ego, lead, t_follow, personalized_active)
+      self.governor.observe(v_ego, lead, t_follow)
     except Exception:
       self._fail("observe")
 
@@ -502,7 +505,7 @@ class SafeGlide:
       return a_target
 
   def update(self, a_target: float, v_ego: float, lead, t_follow: float, source_is_lead: bool, accel_min: float) -> float:
-    self.observe(v_ego, lead, t_follow, True)
+    self.observe(v_ego, lead, t_follow)
     return self.apply(a_target, source_is_lead, accel_min)
 
   def write_state(self, now: float | None = None):

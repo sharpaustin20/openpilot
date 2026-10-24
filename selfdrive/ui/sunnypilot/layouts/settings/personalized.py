@@ -5,12 +5,10 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib import camry_personalized as cp
-from openpilot.selfdrive.controls.lib.camry_personalized import PersonalizedSettings
-from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.sunnypilot.widgets.list_view import ListItemSP, button_item_sp, toggle_item_sp
@@ -24,13 +22,13 @@ MPH = 2.237
 
 # numeric settings shown as -/+ controls: field -> (choices, label)
 NUMBER_OPTIONS = {
-  "coast_margin_s": ([round(0.05 * i, 2) for i in range(0, 11)], lambda v: f"{v:.2f} s"),
-  "light_width_s": ([round(0.1 + 0.05 * i, 2) for i in range(0, 9)], lambda v: f"{v:.2f} s"),
-  "fixed_coast_to_s": ([round(0.8 + 0.05 * i, 2) for i in range(0, 25)], lambda v: f"{v:.2f} s"),
-  "fixed_light_to_s": ([round(0.6 + 0.05 * i, 2) for i in range(0, 25)], lambda v: f"{v:.2f} s"),
-  "light_brake": ([round(-1.5 + 0.1 * i, 1) for i in range(0, 13)], lambda v: f"{v:.1f} m/s²"),
+  "coast_margin_s": ([round(0.05 * i, 2) for i in range(11)], lambda v: f"{v:.2f} s"),
+  "light_width_s": ([round(0.1 + 0.05 * i, 2) for i in range(9)], lambda v: f"{v:.2f} s"),
+  "fixed_coast_to_s": ([round(0.8 + 0.05 * i, 2) for i in range(25)], lambda v: f"{v:.2f} s"),
+  "fixed_light_to_s": ([round(0.6 + 0.05 * i, 2) for i in range(25)], lambda v: f"{v:.2f} s"),
+  "light_brake": ([round(-1.5 + 0.1 * i, 1) for i in range(13)], lambda v: f"{v:.1f} m/s²"),
   "min_ttc_s": ([float(i) for i in range(3, 11)], lambda v: f"{v:.0f} s"),
-  "coast_accel": ([round(-0.6 + 0.1 * i, 1) for i in range(0, 7)], lambda v: f"{v:.1f} m/s²"),
+  "coast_accel": ([round(-0.6 + 0.1 * i, 1) for i in range(7)], lambda v: f"{v:.1f} m/s²"),
   "soft_distance_factor": ([round(0.1 * i, 1) for i in range(1, 11)], lambda v: f"{v:.1f}"),
 }
 
@@ -96,6 +94,10 @@ def _fmt_table(bp_mph, vals) -> str:
   return ", ".join(f"{v:.2f} s @ {b:.0f} mph" for b, v in zip(bp_mph, vals, strict=True))
 
 
+def _per_hour(x) -> str:
+  return "--" if x is None else f"{x:.1f}/h"
+
+
 class PersonalizedLayout(Widget):
   def __init__(self):
     super().__init__()
@@ -120,12 +122,12 @@ class PersonalizedLayout(Widget):
     self._toggles: dict[str, ListItemSP] = {}
     for field, title, desc in (
       ("personalized", "Personalized Profile",
-       "Takes the Aggressive slot of the distance button: Personalized, Standard, Relaxed. Off = stock Aggressive (flat 1.25 s gap). " +
-       "Changes here apply at the next drive; only switching Glide or Soft Plan off applies right away."),
+       "Your gap table in the Aggressive position of the distance button: Personalized, Standard, Relaxed. On by default; " +
+       "off = stock Aggressive (flat 1.25 s gap). Changes here apply at the next drive; only switching Glide or Soft Plan off applies right away."),
       ("glide", "Glide",
-       "Behind a lead, coast instead of braking while the gap is in the coast zone, brake lightly in the zone below it, " +
-       "and brake normally below that. Off when closing fast, when the lead brakes hard, right after a cut-in, or below 11 mph. " +
-       "Only ever asks for less braking; forward collision warning is unchanged."),
+       "In every distance mode: behind a lead, coast instead of braking while the gap is in the coast zone under that mode's target, " +
+       "brake lightly in the zone below it, and brake normally below that. Off when closing fast, when the lead brakes hard, " +
+       "right after a cut-in, or below 11 mph. Only ever asks for less braking; forward collision warning is unchanged."),
       ("soft_plan", "Soft Plan",
        "The planner itself cares less about holding the exact distance while in the glide band, so it plans the glide " +
        "instead of braking to win the gap back. The too-close penalty is unchanged."),
@@ -141,7 +143,8 @@ class PersonalizedLayout(Widget):
                 description=lambda: tr("Gap in seconds by speed. The default is fitted to your manual following; Apply below can tune it.")),
       self._toggles["glide"],
       self._number("coast_margin_s", "Coast Zone Starts", "How far under the target gap coasting is allowed to start (relative band)."),
-      self._number("light_width_s", "Light-Brake Zone Width", "Below the coast zone, braking ramps up to the light braking limit over this many seconds of gap."),
+      self._number("light_width_s", "Light-Brake Zone Width",
+                   "Below the coast zone, braking ramps up to the light braking limit over this many seconds of gap."),
       self._number("light_brake", "Light Braking Limit", "Strongest braking asked for in the light-brake zone."),
       self._number("coast_accel", "Coast Decel", "What to ask for while coasting. -0.3 m/s² is about the Camry's own coast on a flat road."),
       self._number("min_ttc_s", "Glide Only Above TTC", "No glide when time to collision with the lead is under this."),
@@ -187,8 +190,7 @@ class PersonalizedLayout(Widget):
     last, five = stats.get("per_hour_last"), stats.get("per_hour_5")
     if last is None and five is None:
       return "--"
-    f = lambda x: "--" if x is None else f"{x:.1f}/h"
-    return f"{tr('last')} {f(last)}, {tr('last 5')} {f(five)}"
+    return f"{tr('last')} {_per_hour(last)}, {tr('last 5')} {_per_hour(five)}"
 
   def _suggested_text(self) -> str:
     self._refresh_sug()

@@ -1,5 +1,6 @@
 # Closed-loop following test bench: runs sunnypilot's real LongitudinalPlanner (MPC) against simulated leads
-# and compares follow-gap tunes for the Aggressive / Personalized slot, with and without glide and soft plan.
+# and compares follow-gap tunes for the Aggressive / Personalized slot, with and without glide and soft plan,
+# plus glide on and off in the Standard and Relaxed modes (their stock gaps).
 # Nothing is published or written: no msgq sockets are opened, real-time pacing is disabled, and the gap table
 # and Personalized settings are swapped in-process only (the settings file on the device is never read here).
 #
@@ -35,16 +36,28 @@ TUNES = {
   "PR7 1.0":        ([40, 60], [1.0, 1.45]),
   "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
 }
-# Personalized settings per tune (glide/soft plan); tunes not listed run with both off
-GLIDE = cp.PersonalizedSettings(personalized=True, glide=True)
+# settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have glide on)
+OFF = cp.PersonalizedSettings(glide=False, soft_plan=False)
+GLIDE = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=False)
 SOFT = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=True)
 SETTINGS = {
   "0.8 + glide":    (TUNES["0.8 to 35"], GLIDE),
   "0.8 + glide+soft": (TUNES["0.8 to 35"], SOFT),
+  "standard + glide": (TUNES["stock 1.25"], GLIDE),   # table unused: Standard and Relaxed keep their stock gaps
+  "relaxed + glide":  (TUNES["stock 1.25"], GLIDE),
 }
+# glide in the other distance modes: the Plant's personality per tune (default Aggressive)
+PERSONALITIES = {"standard": log.LongitudinalPersonality.standard, "standard + glide": log.LongitudinalPersonality.standard,
+                 "relaxed": log.LongitudinalPersonality.relaxed, "relaxed + glide": log.LongitudinalPersonality.relaxed}
+TUNES["standard"] = TUNES["stock 1.25"]
+TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
-CUR_SETTINGS = [cp.PersonalizedSettings()]   # what make_planner gives the planner (per worker process)
+# GLIDE CHECK: each glide tune against the same gaps without glide
+BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "standard + glide": "standard", "relaxed + glide": "relaxed",
+           "file": "0.8 to 35"}
+CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
+CUR_PERSONALITY = [AGG]
 BRAKE_A = -0.4   # m/s^2, car decel counted as "braking" in the brake-time metric
 
 
@@ -84,7 +97,7 @@ def _update(self, *a, **k):
 long_mpc.LongitudinalMpc.update = _update
 
 
-def set_tune(bp_mph, vals, settings=None):
+def set_tune(bp_mph, vals, settings=None, personality=AGG):
   bp = [b * MPH for b in bp_mph]
   stock = long_mpc.get_T_FOLLOW
   def t_follow(personality=log.LongitudinalPersonality.standard, v_ego=None, personalized=None):
@@ -93,8 +106,9 @@ def set_tune(bp_mph, vals, settings=None):
     return stock(personality)
   long_mpc.get_T_FOLLOW = t_follow
   # the planner's own copy of the table (long_mpc.update reads self.personalized) and the glide settings
-  st = settings if settings is not None else cp.PersonalizedSettings()
+  st = settings if settings is not None else OFF
   CUR_SETTINGS[0] = cp.PersonalizedSettings(**{**st.__dict__, "follow_bp_mph": tuple(bp_mph), "follow_s": tuple(vals)})
+  CUR_PERSONALITY[0] = personality
   return stock
 
 
@@ -181,13 +195,13 @@ def use_camry_planner():
 def make_plant(v0, d0, e2e):
   if CAR_MODE != "honda":
     use_camry_planner()
-  return plant_mod.Plant(lead_relevancy=True, speed=v0, distance_lead=d0, e2e=e2e, personality=AGG)
+  return plant_mod.Plant(lead_relevancy=True, speed=v0, distance_lead=d0, e2e=e2e, personality=CUR_PERSONALITY[0])
 
 
 def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   """lead_profile(t) -> lead speed. Returns metrics after a 30 s settle at constant lead speed."""
   if d0 is None:
-    d0 = long_mpc.get_T_FOLLOW(AGG, v0) * v0 + long_mpc.STOP_DISTANCE
+    d0 = long_mpc.get_T_FOLLOW(CUR_PERSONALITY[0], v0) * v0 + long_mpc.STOP_DISTANCE
   p = make_plant(v0, d0, e2e)
   p.v_lead_prev = v0
   settle = 40.0
@@ -205,7 +219,7 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   d, v, vl, acc = a.T
   closing = vl - v
   ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
-  expect = long_mpc.get_T_FOLLOW(AGG, v[0]) * v[0] + long_mpc.STOP_DISTANCE
+  expect = long_mpc.get_T_FOLLOW(CUR_PERSONALITY[0], v[0]) * v[0] + long_mpc.STOP_DISTANCE
   return dict(gap_m=d[0], expect_m=expect, gap_s=d[0] / max(v[0], 0.1), min_gap_m=d.min(), min_ttc=ttc.min(),
               min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4),
               brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, end_gap_s=d[-1] / max(v[-1], 0.1),
@@ -264,7 +278,8 @@ def cut_in(v_ego_mph, d_cut, dv):
 def job(args):
   name, idx = args
   bp, vals = TUNES[name]
-  set_tune(bp, vals, SETTINGS[name][1] if name in SETTINGS else None)   # each worker process gets its own copy of the patched module
+  # each worker process gets its own copy of the patched module
+  set_tune(bp, vals, SETTINGS[name][1] if name in SETTINGS else None, PERSONALITIES.get(name, AGG))
   sc = scenarios()
   if idx < len(sc):
     title, prof, v0, d0, dur = sc[idx]
@@ -326,10 +341,11 @@ def main():
       m = res[n].get(k)
       if m:
         print(f"    {n:16s} brake {m['brake_s']:5.1f} s  glide {m['glide_s']:5.1f} s  end gap {m['end_gap_s']:.2f}  min gap {m['min_gap_s']:.2f}")
-  base = "0.8 to 35" if "0.8 to 35" in res else names[0]
-  print("\nGLIDE CHECK vs '%s' (no new FCW frames, no new crashes, braking no harder than -2.5 where the base stayed above it):" % base)
+  print("\nGLIDE CHECK, each glide tune vs the same gaps without glide (no new FCW frames, no new crashes, "
+        "braking no harder than -2.5 where the base stayed above it):")
   for n in SETTINGS:
-    if n not in res:
+    base = BASE_OF.get(n, names[0])
+    if n not in res or base not in res:
       continue
     worse = []
     for k, m in res[n].items():
@@ -344,7 +360,8 @@ def main():
         worse.append(f"{k}: decel {m['min_a']:.2f}")
     brake_base = sum(res[base][k]["brake_s"] for k in GLIDE_ONLY if k in res[base])
     brake_n = sum(res[n][k]["brake_s"] for k in GLIDE_ONLY if k in res[n])
-    print(f"  {n:16s} {'PASS' if not worse else 'FAIL'}  braking in glide scenarios {brake_n:.0f} s vs {brake_base:.0f} s" + (f"  {worse}" if worse else ""))
+    print(f"  {n:16s} {'PASS' if not worse else 'FAIL'}  vs '{base}': braking in glide scenarios {brake_n:.0f} s vs {brake_base:.0f} s"
+          + (f"  {worse}" if worse else ""))
 
 
 def diag_job(args):

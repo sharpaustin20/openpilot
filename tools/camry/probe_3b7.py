@@ -7,6 +7,12 @@
 # comma:  cd /data/openpilot && PYTHONPATH=/data/openpilot python3 system/hardware/test_job.py \
 #           /usr/local/venv/bin/python3 /tmp/probe_3b7.py --root /data/media/0/realdata [route ...]
 # Prints ~20 lines; writes nothing.
+#
+# Result on Austin's 2020 Camry SE, 2026-10-24, 99 segments: 0x3B7 is on bus 0 and bus 130 (~19k frames each)
+# and a few frames on bus 2, but NO bit differs by more than 20 points between driver braking (5.7k frames),
+# openpilot decel (0.6k) and neither (12.7k). So the DBC's BRAKE_LIGHTS_ACC bit isn't live on this car and
+# driver_profile.py's pcm_brake stays empty. Next candidates to probe the same way: 0x226 BRAKE_MODULE
+# BRAKE_PRESSURE (hydraulic pressure, should rise under ACC braking too) and 0x1D2 PCM_CRUISE ACCEL_NET.
 import argparse, os, sys
 from collections import defaultdict
 from multiprocessing import Pool

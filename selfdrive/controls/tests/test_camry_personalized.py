@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from openpilot.selfdrive.controls.lib import camry_personalized as cp
 from openpilot.selfdrive.controls.lib.camry_personalized import (BAND_FIXED, GlideGovernor, HARD_MIN_GAP_S, MAX_FOLLOW_S, MIN_FOLLOW_S,
                                                                   PersonalizedSettings, glide_floor, parse_settings, read_settings,
@@ -18,20 +20,21 @@ def governor(**kw):
   return GlideGovernor(live=False, settings=PersonalizedSettings(personalized=True, glide=True, **kw))
 
 
-def run(g, frames, a_target, ld, v_ego=26.8, source_is_lead=True):
+def run(g, frames, a_target, ld, v_ego=26.8, source_is_lead=True, t_follow=T_FOLLOW):
   out = a_target
   for _ in range(frames):
-    out = g.update(a_target, v_ego, ld, T_FOLLOW, source_is_lead, ACCEL_MIN)
+    out = g.update(a_target, v_ego, ld, t_follow, source_is_lead, ACCEL_MIN)
   return out
 
 
 class TestSettings:
-  def test_missing_or_bad_is_off(self, tmp_path):
+  def test_missing_or_bad_is_default(self, tmp_path):
     assert read_settings(str(tmp_path / "missing.json")) == PersonalizedSettings()
     p = tmp_path / "bad.json"
     p.write_text("{not json")
     assert read_settings(str(p)) == PersonalizedSettings()
-    assert not PersonalizedSettings().personalized and not PersonalizedSettings().glide
+    d = PersonalizedSettings()
+    assert d.personalized and d.glide and d.learn and not d.soft_plan   # Personalized replaces Aggressive; glide in every mode
     assert parse_settings([1, 2]) == PersonalizedSettings()
 
   def test_clamped(self):
@@ -40,7 +43,7 @@ class TestSettings:
     assert s.glide and s.light_brake == -1.5 and s.min_ttc_s == 3.0 and s.coast_accel == 0.0
     assert s.band == "relative" and s.coast_margin_s == PersonalizedSettings().coast_margin_s
     assert s.fixed_light_to_s < s.fixed_coast_to_s
-    assert not parse_settings({"glide": 1}).glide  # only a real bool turns it on
+    assert parse_settings({"glide": 1, "soft_plan": 1}) == PersonalizedSettings()  # a non-bool falls back to the default
 
   def test_follow_table(self):
     s = parse_settings({"follow_bp_mph": [35, 40, 60], "follow_s": [0.5, 1.0, 3.0]})
@@ -77,14 +80,13 @@ class TestFloor:
 
 class TestGovernor:
   def test_off_passes_through(self):
-    g = GlideGovernor(live=False, settings=PersonalizedSettings(personalized=True))
+    g = GlideGovernor(live=False, settings=PersonalizedSettings(glide=False))
     assert run(g, 40, -1.0, lead(1.3)) == -1.0
 
-  def test_only_in_personalized(self):
+  def test_every_mode_uses_its_own_gap(self):
     g = governor()
-    for _ in range(40):
-      g.observe(26.8, lead(1.3), T_FOLLOW, False)
-    assert g.apply(-1.0, True, ACCEL_MIN) == -1.0
+    assert run(g, 40, -1.0, lead(1.4), t_follow=1.25) == g.settings.coast_accel          # Personalized gap: coast zone
+    assert run(g, 40, -1.0, lead(1.4), t_follow=1.75) == pytest.approx(-0.6, abs=0.02)   # Relaxed gap: light zone
 
   def test_coasts_instead_of_braking(self):
     g = governor()
@@ -135,14 +137,14 @@ class TestGovernor:
 
 class TestSoftPlan:
   def test_factor(self):
-    g = GlideGovernor(live=False, settings=PersonalizedSettings(personalized=True, soft_plan=True))
+    g = GlideGovernor(live=False, settings=PersonalizedSettings(glide=False, soft_plan=True))
     for _ in range(40):
-      g.observe(26.8, lead(1.3), T_FOLLOW, True)
+      g.observe(26.8, lead(1.3), T_FOLLOW)
     assert g.distance_cost_factor(True) == g.settings.soft_distance_factor
     assert g.distance_cost_factor(False) == 1.0
     assert g.apply(-1.0, True, ACCEL_MIN) == -1.0  # glide itself off
     for _ in range(5):
-      g.observe(26.8, lead(0.8), T_FOLLOW, True)
+      g.observe(26.8, lead(0.8), T_FOLLOW)
     assert g.distance_cost_factor(True) == 1.0
 
   def test_mid_drive_only_switch_off(self, tmp_path):
