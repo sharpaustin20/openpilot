@@ -188,3 +188,29 @@ class TestApplyRevert:
     for _ in range(10):
       cp.revert(p, h)
     assert cp.revert(p, h) is None
+
+
+class TestSafeGlide:
+  def test_passes_through_and_disables_after_error(self):
+    inner = governor()
+    g = cp.SafeGlide(inner)
+    assert run(g, 40, -1.0, lead(1.3)) == inner.settings.coast_accel and g.active   # works like the governor
+    inner.apply = lambda *a, **k: 1 / 0
+    assert g.apply(-1.0, True, ACCEL_MIN) == -1.0 and g.failed
+    assert g.distance_cost_factor(True) == 1.0
+    assert run(g, 5, -1.0, lead(1.3)) == -1.0   # stays off for the drive, even though the governor is fine again
+    assert g.zone == "off"
+
+  def test_output_bounds(self):
+    inner = governor()
+    g = cp.SafeGlide(inner)
+    run(g, 40, -1.0, lead(1.3))
+    inner.apply = lambda a, *_: a - 1.0          # a buggy governor asking for more braking
+    assert g.apply(-1.0, True, ACCEL_MIN) == -1.0
+    inner.apply = lambda a, *_: 0.5              # or for throttle
+    assert g.apply(-1.0, True, ACCEL_MIN) == -1.0
+    inner.apply = lambda a, *_: float("nan")
+    assert g.apply(-1.0, True, ACCEL_MIN) == -1.0
+    inner.distance_cost_factor = lambda *_: 0.0
+    assert g.distance_cost_factor(True) == 1.0
+    assert not g.failed

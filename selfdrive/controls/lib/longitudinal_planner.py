@@ -13,7 +13,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib import long_mpc
-from openpilot.selfdrive.controls.lib.camry_personalized import GlideGovernor, follow_table_ms
+from openpilot.selfdrive.controls.lib.camry_personalized import GlideGovernor, SafeGlide, follow_table_ms
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
@@ -64,9 +64,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
-    # Camry Personalized profile in the Aggressive slot: settings are read once per drive (plannerd start)
-    self.glide = GlideGovernor(dt=dt)
-    self.mpc.personalized = follow_table_ms(self.glide.settings)
+    # Camry Personalized profile in the Aggressive slot: settings are read once per drive (plannerd start).
+    # SafeGlide: any error in the glide code logs once and leaves the plain MPC output for the rest of the drive.
+    self.mpc.personalized = None
+    try:
+      self.glide = SafeGlide(GlideGovernor(dt=dt))
+      self.mpc.personalized = follow_table_ms(self.glide.settings)
+    except Exception:
+      cloudlog.exception("camry personalized: settings failed, stock Aggressive for this drive")
+      self.glide = SafeGlide(GlideGovernor(live=False))
+      self.glide.failed = True
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -148,8 +155,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if reset_state or force_slow_decel:
       self.glide.reset()
     else:
-      self.glide.observe(v_ego, sm['radarState'].leadOne, long_mpc.get_T_FOLLOW(personality, v_ego, self.mpc.personalized),
-                         personalized_active)
+      try:
+        t_follow = long_mpc.get_T_FOLLOW(personality, v_ego, self.mpc.personalized)
+      except Exception:
+        t_follow = 0.0
+        self.glide._fail("get_T_FOLLOW")
+      self.glide.observe(v_ego, sm['radarState'].leadOne, t_follow, personalized_active)
     obstacle_cost_factor = self.glide.distance_cost_factor(self.mpc.source == LongitudinalPlanSource.lead0)
 
     self.mpc.set_weights(prev_accel_constraint, personality=personality, obstacle_cost_factor=obstacle_cost_factor)

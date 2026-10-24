@@ -100,7 +100,7 @@ def set_tune(bp_mph, vals, settings=None):
 
 def personalize(planner):
   st = CUR_SETTINGS[0]
-  planner.glide = cp.GlideGovernor(dt=DT, live=False, settings=st)
+  planner.glide = cp.SafeGlide(cp.GlideGovernor(dt=DT, live=False, settings=st))   # explicit settings, never the device's file
   planner.mpc.personalized = cp.follow_table_ms(st)   # None unless the tune's settings say Personalized
   return planner
 

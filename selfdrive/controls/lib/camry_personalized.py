@@ -438,6 +438,82 @@ class GlideGovernor:
       pass
 
 
+class SafeGlide:
+  """Fail-safe wrapper used by the planner: any exception in the governor is logged once, glide and soft plan
+  are then off for the rest of the drive, and the planner gets the plain MPC output (factor 1.0, a_target as is).
+  Attributes (settings, zone, active, ...) read through to the governor."""
+  def __init__(self, governor):
+    self.governor = governor
+    self.failed = False
+
+  def __getattr__(self, name):
+    return getattr(self.governor, name)
+
+  def _fail(self, where: str):
+    if not self.failed:
+      cloudlog.exception(f"camry personalized: {where} failed, glide off for this drive")
+    self.failed = True
+    try:
+      self.governor.reset()
+    except Exception:
+      pass
+
+  def refresh_settings(self, now: float | None = None):
+    if self.failed:
+      return
+    try:
+      self.governor.refresh_settings(now)
+    except Exception:
+      self._fail("refresh_settings")
+
+  def reset(self):
+    try:
+      self.governor.reset()
+    except Exception:
+      self._fail("reset")
+
+  def observe(self, v_ego: float, lead, t_follow: float, personalized_active: bool):
+    if self.failed:
+      return
+    try:
+      self.governor.observe(v_ego, lead, t_follow, personalized_active)
+    except Exception:
+      self._fail("observe")
+
+  def distance_cost_factor(self, source_is_lead: bool) -> float:
+    if self.failed:
+      return 1.0
+    try:
+      f = float(self.governor.distance_cost_factor(source_is_lead))
+      return f if 0.1 <= f <= 1.0 else 1.0
+    except Exception:
+      self._fail("distance_cost_factor")
+      return 1.0
+
+  def apply(self, a_target: float, source_is_lead: bool, accel_min: float) -> float:
+    if self.failed:
+      return a_target
+    try:
+      out = float(self.governor.apply(a_target, source_is_lead, accel_min))
+      # never more braking than the MPC asked for, never throttle it didn't ask for
+      return out if math.isfinite(out) and a_target <= out <= max(a_target, 0.0) else a_target
+    except Exception:
+      self._fail("apply")
+      return a_target
+
+  def update(self, a_target: float, v_ego: float, lead, t_follow: float, source_is_lead: bool, accel_min: float) -> float:
+    self.observe(v_ego, lead, t_follow, True)
+    return self.apply(a_target, source_is_lead, accel_min)
+
+  def write_state(self, now: float | None = None):
+    if self.failed:
+      return
+    try:
+      self.governor.write_state(now)
+    except Exception:
+      self._fail("write_state")
+
+
 def read_state(path: str | None = None, max_age: float = 3.0) -> dict | None:
   st = read_json(path or state_path(), 1024)
   return st if isinstance(st, dict) and time.time() - st.get("t", 0) < max_age else None
