@@ -24,7 +24,22 @@ Personal sunnypilot branch for one car:
      ~25-28 mph. No stop-and-go (the PCM's low-speed lockout stays).
    - Without it on this car: "Cruise Fault: Restart the Car" (fails safe).
 
-2. **Use All CPU Cores (Car Off)** (Settings > Fan; `system/hardware/offroad_cores.py`,
+2. **Radar reader for the filter's 0x680 target**
+   (`opendbc_repo/opendbc/car/toyota/radar_interface.py`)
+   - With the radar filter, the car radar's in-path target shows up on
+     bus 1 as 0x680 (10 Hz): distance and side position, no relative
+     speed (reverse-engineered, unofficial).
+   - Relative speed is estimated from distance with a Kalman filter on
+     the lead's own speed, using ego speed from SPEED (0xB4) so ego
+     braking is not read as lead braking. A new target is held back
+     0.5 s until its speed has settled.
+   - radard only uses the track when it matches the camera lead, so the
+     camera still decides what the lead is; otherwise it falls back to
+     the camera lead as before. Any reader error also falls back to the
+     camera instead of crashing card.
+   - Only active for `TOYOTA_CAMRY` with the SMART_DSU flag.
+
+3. **Use All CPU Cores (Car Off)** (Settings > Fan; `system/hardware/offroad_cores.py`,
    `system/hardware/hardwared.py`, `system/hardware/tici/hardware.py`)
    - Stock power save takes cpu4-7 offline while the car is off and the
      screen is asleep. With this toggle on, all 8 cores stay online
@@ -37,8 +52,6 @@ Personal sunnypilot branch for one car:
      offroad time and thermal logic are unchanged. The battery estimate
      uses measured power draw, so extra draw is counted.
    - Onroad behavior is unchanged.
-
-Not included yet: the 0x680 radar reader (still being tested).
 
 ## Updating
 
