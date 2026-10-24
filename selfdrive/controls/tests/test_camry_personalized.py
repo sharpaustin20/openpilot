@@ -192,6 +192,15 @@ class TestApplyRevert:
     assert cp.revert(p, h) is None
 
 
+class TestSaveKeepsLiveFile:
+  def test_live_file_is_copied_not_moved(self, tmp_path):
+    p, h = str(tmp_path / "camry_long.json"), str(tmp_path / "hist")
+    write_settings(PersonalizedSettings(light_brake=-0.5), p)
+    cp.save_with_history(PersonalizedSettings(light_brake=-0.7), p, h)
+    assert read_settings(p).light_brake == -0.7 and cp.history_count(h) == 1
+    assert read_settings(str(tmp_path / "hist" / sorted((tmp_path / "hist").iterdir())[0].name)).light_brake == -0.5
+
+
 class TestSafeGlide:
   def test_passes_through_and_disables_after_error(self):
     inner = governor()

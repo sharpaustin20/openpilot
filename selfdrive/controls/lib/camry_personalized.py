@@ -26,6 +26,7 @@ switching glide or soft plan off takes effect within a second.
 import json
 import math
 import os
+import shutil
 import time
 from dataclasses import asdict, dataclass, fields, replace
 
@@ -233,7 +234,8 @@ def save_with_history(s: PersonalizedSettings, path: str | None = None, hist: st
   try:
     os.makedirs(hist, exist_ok=True)
     if os.path.exists(path):
-      os.replace(path, os.path.join(hist, f"{time.time_ns()}.json"))
+      # copy, not move: the live file stays in place until write_settings replaces it atomically
+      shutil.copy2(path, os.path.join(hist, f"{time.time_ns()}.json"))
     old = sorted(os.listdir(hist))
     for name in old[:-HISTORY_KEEP]:
       os.remove(os.path.join(hist, name))

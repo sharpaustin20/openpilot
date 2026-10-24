@@ -205,9 +205,14 @@ class PersonalizedLayout(Widget):
     if not self._sug:
       return tr("none yet")
     ch = self._sug.get("changes", [])
+    gate = self._sug.get("gate") or {}
     if not ch:
+      if self._sug.get("dropped") and gate.get("verdict") == "fail":
+        return tr("dropped: the bench showed more FCW, crashes or a smaller gap: ") + "; ".join(gate.get("worse", [])[:2])
       return tr("no change suggested")
     parts = [tr("applied automatically after your last drive (Undo below):")] if self._sug.get("applied") else []
+    if gate.get("verdict") != "pass":
+      parts.append(tr("not benched yet"))
     for c in ch[:3]:
       name = FIELD_NAMES.get(c.get("field"), c.get("field"))
       if c.get("field") == "follow_s":

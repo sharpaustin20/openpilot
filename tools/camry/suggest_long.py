@@ -5,7 +5,7 @@
 #
 #   PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 tools/camry/suggest_long.py /tmp/driver_profile.json
 # Options: --settings FILE, --out FILE (suggestion), --history FILE (per-route stats), --print-only
-import argparse, json, os, sys, time
+import argparse, json, os, subprocess, sys, tempfile, time
 from collections import defaultdict
 
 import numpy as np
@@ -26,6 +26,7 @@ STOCK_T_FOLLOW = {1: 1.45, 2: 1.75}   # personality raw -> stock gap (standard, 
 SOFT_STEP = 0.1
 SOFT_FLOOR = 0.2
 SOFT_RELAX_ENGAGED_S = 3600
+GATE_TIMEOUT_S = 900     # the quick bench of current vs candidate settings takes about a minute on the comma
 
 
 def pct(xs, p):
@@ -160,6 +161,26 @@ def suggest_soft(tot, settings):
   return [dict(field="soft_distance_factor", to=new, why=why, **{"from": cur})]
 
 
+def bench_gate(settings, candidate):
+  """Quick follow_bench of the candidate settings against the current ones (follow_bench.py --gate), as a child of
+  this process so it ends with the learning job. Returns the GATE_JSON dict, or {"verdict": "skipped", "why": ...}."""
+  bench = os.path.join(os.path.dirname(os.path.abspath(__file__)), "follow_bench.py")
+  root = os.path.dirname(os.path.dirname(os.path.dirname(bench)))
+  try:
+    with tempfile.TemporaryDirectory() as d:
+      cur, cand = os.path.join(d, "current.json"), os.path.join(d, "candidate.json")
+      cp.write_settings(settings, cur)
+      cp.write_settings(candidate, cand)
+      r = subprocess.run([sys.executable, bench, "--gate", cur, cand], capture_output=True, text=True, timeout=GATE_TIMEOUT_S,
+                         env={**os.environ, "OPENPILOT_PREFIX": "lbench"}, cwd=root)
+    for line in r.stdout.splitlines():
+      if line.startswith("GATE_JSON "):
+        return json.loads(line[len("GATE_JSON "):])
+    return dict(verdict="skipped", why=f"bench gave no verdict (exit {r.returncode}): {(r.stderr or r.stdout)[-300:].strip()}")
+  except Exception as e:
+    return dict(verdict="skipped", why=f"bench did not run: {e}")
+
+
 def update_history(tot, path):
   hist = cp.read_json(path) or {}
   routes = hist.get("routes", {})
@@ -190,6 +211,7 @@ def main():
   ap.add_argument("--out", default=cp.suggested_path())
   ap.add_argument("--history", default=os.path.join(os.path.dirname(cp.suggested_path()), "camry_long_learned.json"))
   ap.add_argument("--print-only", action="store_true")
+  ap.add_argument("--no-gate", action="store_true", help="skip the quick bench of the candidate settings")
   a = ap.parse_args()
   with open(a.profile) as f:
     tot = json.load(f)
@@ -208,8 +230,21 @@ def main():
     print(f"  {c['field']}: {c['from']} -> {c['to']}  ({c['why']})")
   if not changes:
     print("  no change suggested")
+  if changes and not a.no_gate:
+    # the candidate (what Apply would produce) must bench no worse than the current settings before it is offered
+    gate = bench_gate(settings, cp.apply_suggested(sug, settings))
+    sug["gate"] = gate
+    if gate["verdict"] == "fail":
+      sug["dropped"], sug["changes"] = changes, []
+      changes = []
+      print(f"bench gate: FAIL, suggestions dropped: {gate.get('worse')}")
+    elif gate["verdict"] == "pass":
+      print(f"bench gate: PASS (candidate crashes {gate['candidate']['crashes']}, FCW {gate['candidate']['fcw']}, "
+            f"min gap {gate['candidate']['min_gap_s']} s; current {gate['current']['crashes']}, {gate['current']['fcw']}, {gate['current']['min_gap_s']} s)")
+    else:
+      print(f"bench gate: not run ({gate.get('why')}); suggestions kept but not applied automatically")
   if not a.print_only:
-    if settings.auto_apply and changes:
+    if settings.auto_apply and changes and sug.get("gate", {}).get("verdict") == "pass":
       # "Apply Automatically" is on: same limited step as the page's Apply button, previous file kept for Undo
       new = cp.apply_suggested(sug, settings)
       if new != settings:

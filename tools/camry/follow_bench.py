@@ -8,6 +8,7 @@
 #   cd /data/openpilot && OPENPILOT_PREFIX=lbench PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 /tmp/follow_bench.py
 # Options: --table FILE   also bench the Personalized settings file FILE (e.g. before tapping Apply)
 #          --quick        only the glide-relevant scenarios
+#          --gate CURRENT CANDIDATE   quick bench of two settings files, PASS/FAIL for the candidate (used by suggest_long.py)
 import os, sys
 os.environ.setdefault("OPENPILOT_PREFIX", "lbench")   # isolate params/msgq namespace from the real system
 
@@ -62,12 +63,12 @@ CUR_PERSONALITY = [AGG]
 BRAKE_A = -0.4   # m/s^2, car decel counted as "braking" in the brake-time metric
 
 
-def add_table_tune(path):
-  """--table FILE: the Personalized settings file as its own tune, with its glide/soft plan settings."""
+def add_table_tune(path, name="file"):
+  """--table FILE: the Personalized settings file as its own tune, with its glide/soft plan settings (also --gate)."""
   st = cp.read_settings(path)
   bp, vals = cp.follow_table_ms(cp.PersonalizedSettings(**{**st.__dict__, "personalized": True}))
-  TUNES["file"] = ([b / MPH for b in bp], list(vals))
-  SETTINGS["file"] = (TUNES["file"], st)
+  TUNES[name] = ([b / MPH for b in bp], list(vals))
+  SETTINGS[name] = (TUNES[name], st)
 
 
 class FakeRk:
@@ -293,15 +294,17 @@ CUT_INS = ((40, 15, 3), (60, 25, 4), (45, 28, 1), (45, 20, 2))   # the last two:
 GLIDE_ONLY = [t for t, *_ in glide_scenarios()]
 
 
-def main():
+def job_list(names, quick):
+  """(tune, scenario index) pairs; quick = steady, glide and cut-in scenarios only."""
+  sc = scenarios()
+  n_jobs = len(sc) + len(CUT_INS)
+  return [(name, i) for name in names for i in range(n_jobs)
+          if not quick or i >= len(sc) or sc[i][0] in GLIDE_ONLY or sc[i][0].startswith("steady")]
+
+
+def run_jobs(jobs, names):
   from multiprocessing import Pool
-  if "--table" in sys.argv:
-    add_table_tune(sys.argv[sys.argv.index("--table") + 1])
-  quick = "--quick" in sys.argv
-  n_jobs = len(scenarios()) + len(CUT_INS)
-  jobs = [(name, i) for name in TUNES for i in range(n_jobs)
-          if not quick or i >= len(scenarios()) or scenarios()[i][0] in GLIDE_ONLY or scenarios()[i][0].startswith("steady")]
-  res = {name: {} for name in TUNES}
+  res = {name: {} for name in names}
   order = [t for t, *_ in scenarios()] + [f"cut-in {d} m ahead, {dv} m/s slower at {m} mph" for m, d, dv in CUT_INS]
   print(f"{len(jobs)} runs on {os.cpu_count()} cores", flush=True)
   with Pool(os.cpu_count(), maxtasksperchild=1) as pool:   # fresh process per job: no patches leak between jobs
@@ -309,9 +312,46 @@ def main():
       res[name][title] = m
       if k % 10 == 0:
         print(f"  {k}/{len(jobs)}", flush=True)
-  res = {n: {t: r[t] for t in order if t in r} for n, r in res.items()}
+  return {n: {t: r[t] for t in order if t in r} for n, r in res.items()}
 
+
+def gate(cur_path, cand_path):
+  """--gate CURRENT CANDIDATE (two settings files): quick bench of both in the Personalized slot. PASS unless the
+  candidate has more FCW frames or crashes in a scenario, brakes harder than -2.5 where the current didn't, gets
+  under HARD_MIN_GAP_S where the current didn't, or misses its steady gap. Prints a verdict line and a GATE_JSON
+  line (read by suggest_long.py before a suggestion is offered or applied)."""
+  import json
+  add_table_tune(cur_path, "current")
+  add_table_tune(cand_path, "candidate")
+  names = ["current", "candidate"]
+  res = run_jobs(job_list(names, True), names)
+  worse = []
+  for k, m in res["candidate"].items():
+    b = res["current"].get(k)
+    if b is None:
+      continue
+    if m["fcw"] > b["fcw"]:
+      worse.append(f"{k}: FCW {m['fcw']} > {b['fcw']}")
+    if m["crash"] and not b["crash"]:
+      worse.append(f"{k}: crash")
+    if m["min_a"] < -2.5 <= b["min_a"]:
+      worse.append(f"{k}: decel {m['min_a']:.2f}")
+    if "min_gap_s" in m and m["min_gap_s"] < cp.HARD_MIN_GAP_S <= b.get("min_gap_s", 9.0):
+      worse.append(f"{k}: min gap {m['min_gap_s']:.2f} s")
+    if k.startswith("steady") and abs(m["gap_m"] - m["expect_m"]) > 0.15 * m["expect_m"] + 1:
+      worse.append(f"{k}: steady gap {m['gap_m']:.0f} m, table {m['expect_m']:.0f} m")
+  tot = {n: dict(fcw=sum(m["fcw"] for m in res[n].values()), crashes=sum(m["crash"] for m in res[n].values()),
+                 brake_s=round(sum(m.get("brake_s", 0.0) for m in res[n].values()), 1),
+                 min_gap_s=round(min(m["min_gap_s"] for m in res[n].values() if "min_gap_s" in m), 2)) for n in names}
+  print(f"GATE {'PASS' if not worse else 'FAIL'}: current {tot['current']} candidate {tot['candidate']}" + (f"  {worse}" if worse else ""))
+  print("GATE_JSON " + json.dumps(dict(verdict="pass" if not worse else "fail", worse=worse, **tot)))
+
+
+def main():
+  if "--table" in sys.argv:
+    add_table_tune(sys.argv[sys.argv.index("--table") + 1])
   names = list(TUNES)
+  res = run_jobs(job_list(names, "--quick" in sys.argv), names)
   print("\nsteady gap at speed (m / s):")
   for mph in (30, 45, 60, 70):
     k = f"steady {mph} mph"
@@ -412,4 +452,9 @@ def diag():
 
 
 if __name__ == "__main__":
-  diag() if "--diag" in sys.argv else main()
+  if "--gate" in sys.argv:
+    gate(sys.argv[sys.argv.index("--gate") + 1], sys.argv[sys.argv.index("--gate") + 2])
+  elif "--diag" in sys.argv:
+    diag()
+  else:
+    main()
