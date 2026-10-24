@@ -70,13 +70,17 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
     raise NotImplementedError("Longitudinal personality not supported")
 
 
-def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
+# Camry: aggressive follows the driver's own profile (measured from manual drives), closer in town
+AGGRESSIVE_T_FOLLOW_BP = [17.9, 26.8]  # m/s, 40 mph and 60 mph
+AGGRESSIVE_T_FOLLOW_V = [1.0, 1.45]
+
+def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, v_ego=0.0):
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.75
   elif personality==log.LongitudinalPersonality.standard:
     return 1.45
   elif personality==log.LongitudinalPersonality.aggressive:
-    return 1.25
+    return float(np.interp(v_ego, AGGRESSIVE_T_FOLLOW_BP, AGGRESSIVE_T_FOLLOW_V))
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
@@ -314,8 +318,8 @@ class LongitudinalMpc:
     return lead_xv
 
   def update(self, radarstate, v_cruise, personality=log.LongitudinalPersonality.standard):
-    t_follow = get_T_FOLLOW(personality)
     v_ego = self.x0[1]
+    t_follow = get_T_FOLLOW(personality, v_ego)
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
     lead_xv_0 = self.process_lead(radarstate.leadOne)
