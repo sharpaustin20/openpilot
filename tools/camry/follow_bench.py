@@ -208,7 +208,8 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   expect = long_mpc.get_T_FOLLOW(AGG, v[0]) * v[0] + long_mpc.STOP_DISTANCE
   return dict(gap_m=d[0], expect_m=expect, gap_s=d[0] / max(v[0], 0.1), min_gap_m=d.min(), min_ttc=ttc.min(),
               min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4),
-              brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, end_gap_s=d[-1] / max(v[-1], 0.1))
+              brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, end_gap_s=d[-1] / max(v[-1], 0.1),
+              min_gap_s=d.min() / max(v[0], 0.1))
 
 
 def scenarios():
@@ -324,8 +325,7 @@ def main():
     for n in names:
       m = res[n].get(k)
       if m:
-        v0 = k.split(" mph")[0].split()[-1]
-        print(f"    {n:16s} brake {m['brake_s']:5.1f} s  glide {m['glide_s']:5.1f} s  end gap {m['end_gap_s']:.2f}  min gap {m['min_gap_m'] / max(float(v0) * MPH, 0.1):.2f}")
+        print(f"    {n:16s} brake {m['brake_s']:5.1f} s  glide {m['glide_s']:5.1f} s  end gap {m['end_gap_s']:.2f}  min gap {m['min_gap_s']:.2f}")
   base = "0.8 to 35" if "0.8 to 35" in res else names[0]
   print("\nGLIDE CHECK vs '%s' (no new FCW frames, no new crashes, braking no harder than -2.5 where the base stayed above it):" % base)
   for n in SETTINGS:
