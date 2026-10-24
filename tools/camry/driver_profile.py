@@ -43,7 +43,7 @@ def extract_route(args):
   from openpilot.tools.lib.logreader import LogReader
   ticks, cur, last_t, note, errors, seen = [], {}, None, "", 0, set()
   cur.update(v=0.0, a=0.0, gas=False, brake=False, blinker=False, steer=False, cruise=False,
-             long_active=False, sd_state="disabled", enabled=False, personality=None, a_target=None,
+             long_active=False, lat_active=False, sd_state="disabled", enabled=False, personality=None, a_target=None,
              plan_fcw=False, lead=False, d=0.0, vrel=0.0, vlead=0.0, alead=0.0, yrel=0.0, prob=0.0,
              radar=False, gap_btn=False)
   for s in segs:
@@ -76,6 +76,7 @@ def extract_route(args):
             last_t = t
         elif w == "carControl":
           cur["long_active"] = m.carControl.longActive
+          cur["lat_active"] = m.carControl.latActive
         elif w == "selfdriveState":
           sd = m.selfdriveState
           cur.update(sd_state=str(sd.state), enabled=sd.enabled, personality=sd.personality.raw)
@@ -110,10 +111,11 @@ def ttc(k):
 def mode(k):
   if k["long_active"] and not k["gas"]:
     return "engaged"
-  if k["enabled"] and k["gas"]:
+  # cruise (PCM) engaged is what "long engaged" means on this car; MADS can keep lateral on without it
+  if k["cruise"] and k["gas"]:
     return "gas_override"
-  if not k["enabled"] and not k["cruise"]:
-    return "manual"
+  if not k["cruise"]:
+    return "manual_lat" if k["lat_active"] else "manual"   # manual_lat: sunnypilot steering, driver on the pedals
   return "other"
 
 
@@ -156,13 +158,13 @@ def analyze(route, ticks):
     prev = ticks[i - 1] if i else k
 
     # steady following: same lead, matched speed, not accelerating hard
-    if good_lead(k) and abs(k["vrel"]) < 1.0 and abs(k["a"]) < 0.4 and not k["blinker"] and md in ("manual", "engaged"):
+    if good_lead(k) and abs(k["vrel"]) < 1.0 and abs(k["a"]) < 0.4 and not k["blinker"] and md in ("manual", "manual_lat", "engaged"):
       b = bin_of(k["v"])
       if b and i % 4 == 0 and same_lead_window(ticks, i - 20, i):   # 5 Hz samples, lead stable for 1 s
-        key = md if md == "manual" else f"engaged_{PERSONALITY.get(k['personality'], 'unknown')}"
+        key = md if md.startswith("manual") else f"engaged_{PERSONALITY.get(k['personality'], 'unknown')}"
         out["steady_gap"][key][b].append(round(t_equiv(k), 3))
 
-    if md == "manual" and good_lead(k):
+    if md in ("manual", "manual_lat") and good_lead(k):
       if k["vrel"] > 1.0 and k["gas"] and i % 4 == 0:
         out["manual_accel_lead_away"].append(round(k["a"], 2))
       # brake onset with a lead closing in
@@ -176,9 +178,9 @@ def analyze(route, ticks):
                                                ttc=round(ttc(k), 1) if ttc(k) else None))
 
     # gas override while engaged: start of a press
-    if k["enabled"] and k["gas"] and not prev["gas"]:
+    if k["cruise"] and k["gas"] and not prev["gas"]:
       j = i
-      while j < n - 1 and ticks[j]["gas"] and ticks[j]["enabled"]:
+      while j < n - 1 and ticks[j]["gas"] and ticks[j]["cruise"]:
         j += 1
       seg = ticks[i:j + 1]
       ok = good_lead(k) and same_lead_window(ticks, i - W, j)
@@ -190,7 +192,7 @@ def analyze(route, ticks):
         gap_s_end=round(t_equiv(ticks[j]), 2) if good_lead(ticks[j]) else None, same_lead=ok))
 
     # brake takeover: was engaged, now disengaged with the brake down
-    if prev["enabled"] and not k["enabled"] and k["brake"]:
+    if prev["cruise"] and not k["cruise"] and k["brake"]:
       after = [x["a"] for x in ticks[i:i + W]]
       ok = good_lead(k) and same_lead_window(ticks, i - W, i)
       out["brake_takeovers"].append(dict(
@@ -229,7 +231,7 @@ def summary(tot):
   L = [f"routes {len(tot['routes'])}, {tot['seconds'] / 60:.0f} min; time by mode (min): "
        + ", ".join(f"{m} {s / 60:.0f}" for m, s in sorted(tot["mode_seconds"].items()))]
   L.append("steady following gap as sunnypilot t_follow (s): median [p25-p75] (samples)")
-  for md in ["manual"] + sorted(m for m in tot["steady_gap"] if m.startswith("engaged")):
+  for md in ["manual", "manual_lat"] + sorted(m for m in tot["steady_gap"] if m.startswith("engaged")):
     bins = tot["steady_gap"].get(md, {})
     row = []
     for lo, hi in SPEED_BINS:
