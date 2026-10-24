@@ -24,6 +24,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, read_fan_mode
+from openpilot.system.hardware.offroad_cores import keep_all_cores_offroad, read_offroad_all_cores
 from openpilot.system.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -184,6 +185,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   in_car = False
   engaged_prev = False
   pwrsave = False
+  pwrsave_all_cores = False
   offroad_cycle_count = 0
 
   params = Params()
@@ -356,9 +358,13 @@ def hardware_thread(end_event, hw_queue) -> None:
         pass
 
     should_pwrsave = not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
-    if should_pwrsave != pwrsave or (count == 0):
-      HARDWARE.set_power_save(should_pwrsave)
+    # car-off "all cores" setting: only changes which cores power save leaves online
+    all_cores = should_pwrsave and keep_all_cores_offroad(read_offroad_all_cores(), thermal_status >= ThermalStatus.overheated,
+                                                          in_car, power_monitor.car_voltage_mV)
+    if should_pwrsave != pwrsave or all_cores != pwrsave_all_cores or (count == 0):
+      HARDWARE.set_power_save(should_pwrsave, keep_all_cores=all_cores)
     pwrsave = should_pwrsave
+    pwrsave_all_cores = all_cores
 
     if should_start:
       off_ts = None

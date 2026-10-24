@@ -24,6 +24,20 @@ Personal sunnypilot branch for one car:
      ~25-28 mph. No stop-and-go (the PCM's low-speed lockout stays).
    - Without it on this car: "Cruise Fault: Restart the Car" (fails safe).
 
+2. **Use All CPU Cores (Car Off)** (Settings > Fan; `system/hardware/offroad_cores.py`,
+   `system/hardware/hardwared.py`, `system/hardware/tici/hardware.py`)
+   - Stock power save takes cpu4-7 offline while the car is off and the
+     screen is asleep. With this toggle on, all 8 cores stay online
+     (ondemand governor, capped at 1689 MHz like onroad) so offline jobs
+     such as log replays run faster.
+   - Off by default. Stored in `/data/offroad_all_cores` ("1" = on).
+   - Falls back to stock power save when the device is overheated, or in
+     the car when the low-passed battery voltage is below 12.0 V.
+   - The 11.8 V low-voltage shutdown, battery-estimate shutdown, max
+     offroad time and thermal logic are unchanged. The battery estimate
+     uses measured power draw, so extra draw is counted.
+   - Onroad behavior is unchanged.
+
 Not included yet: the 0x680 radar reader (still being tested).
 
 ## Updating
