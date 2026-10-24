@@ -39,6 +39,25 @@ Personal sunnypilot branch for one car:
      camera instead of crashing card.
    - Only active for `TOYOTA_CAMRY` with the SMART_DSU flag.
 
+3. **Test job mode** (`system/hardware/test_job.py`, `system/hardware/hardwared.py`,
+   `system/hardware/tici/hardware.py`, `system/hardware/fan_controller.py`, Settings > Fan)
+   - Run a script through the wrapper to mark it as a test job:
+     `python3 /data/openpilot/system/hardware/test_job.py python3 my_script.py`
+     (over SSH: `ssh comma@<ip> python3 /data/openpilot/system/hardware/test_job.py python3 - < my_script.py`).
+   - While it runs with the car off: all 8 cores online, performance
+     governor, full clock speed, and the fan never slower than the
+     Auto (testing) curve. It switches back as soon as the script exits
+     (the marker holds the PID and process start time, so a crashed job
+     or a stale marker after reboot is ignored).
+   - Car on: no effect, stock onroad CPU config (1689 MHz cap).
+   - Once the device is overheated/critical (offroad this includes the
+     stock 75 C offroad danger temp after 5 min), clocks drop to the
+     1689 MHz cap for the rest of the job and the fan goes to 100%.
+   - In the car, off below 12.0 V low-passed battery voltage. The 11.8 V
+     low-voltage shutdown, battery-estimate shutdown and max offroad
+     time are unchanged.
+   - Fan page shows whether a test job is running and which cores are online.
+
 ## Updating
 
 This branch is pinned to v2026.002.002. To move to a newer sunnypilot

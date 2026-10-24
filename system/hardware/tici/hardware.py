@@ -294,7 +294,7 @@ class Tici(HardwareBase):
     except Exception:
       return 0
 
-  def set_power_save(self, powersave_enabled):
+  def set_power_save(self, powersave_enabled, test_job_speed=None):
     # amplifier, 100mW at idle
     if self.amplifier is not None:
       self.amplifier.set_global_shutdown(amp_disabled=powersave_enabled)
@@ -303,19 +303,26 @@ class Tici(HardwareBase):
 
     # *** CPU config ***
 
+    # test job (car off only, see test_job.py): all cores online with the performance governor,
+    # at full speed ("full") or at the onroad 1689 MHz cap ("capped", when the device is hot)
+    all_cores = not powersave_enabled or test_job_speed is not None
+
     # offline big cluster
     for i in range(4, 8):
-      val = '0' if powersave_enabled else '1'
+      val = '1' if all_cores else '0'
       sudo_write(val, f'/sys/devices/system/cpu/cpu{i}/online')
 
     for n in ('0', '4'):
-      if powersave_enabled and n == '4':
+      if not all_cores and n == '4':
         continue
-      gov = 'ondemand' if powersave_enabled else 'performance'
+      gov = 'performance' if all_cores else 'ondemand'
       sudo_write(gov, f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_governor')
-      if not powersave_enabled:
+      if all_cores:
+        max_freq = ''
+        if test_job_speed == 'full':
+          max_freq = sudo_read(f'/sys/devices/system/cpu/cpufreq/policy{n}/cpuinfo_max_freq')
         # cap max core freq to 1689 Mhz
-        sudo_write('1689600', f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_max_freq')
+        sudo_write(max_freq or '1689600', f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_max_freq')
 
     # *** IRQ config ***
 

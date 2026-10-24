@@ -22,7 +22,8 @@ class FanController:
     self.last_ignition = False
     self.controller = PIDController(k_p=0, k_i=4e-3, rate=rate)
 
-  def update(self, cur_temp: float, ignition: bool, fan_mode: int = FAN_MODE_AUTO) -> int:
+  def update(self, cur_temp: float, ignition: bool, fan_mode: int = FAN_MODE_AUTO, test_job: bool = False) -> int:
+    """test_job: a test script is running (see test_job.py), the fan is never slower than Auto (testing)."""
     # no offroad cap (stock caps offroad at 30%), so the device can cool during car-off testing
     self.controller.pos_limit = 100
     self.controller.neg_limit = 30 if ignition else 0
@@ -37,8 +38,9 @@ class FanController:
                   feedforward=np.interp(cur_temp, [60.0 + OFFSET, 100.0 + OFFSET], [0, 100])
                ))
 
-    if fan_mode == FAN_MODE_AUTO_TESTING:
-      return max(stock, int(np.interp(cur_temp, TESTING_CURVE_TEMPS, TESTING_CURVE_SPEEDS)))
+    testing = int(np.interp(cur_temp, TESTING_CURVE_TEMPS, TESTING_CURVE_SPEEDS))
+    if fan_mode == FAN_MODE_AUTO_TESTING or (test_job and fan_mode < 0):
+      return max(stock, testing)
 
     if fan_mode < 0:
       return stock
@@ -47,4 +49,4 @@ class FanController:
     level = int(np.clip(fan_mode, 0, 100))
     if ignition:
       level = max(level, MANUAL_ONROAD_MIN)
-    return max(level, stock)
+    return max(level, stock, testing if test_job else 0)

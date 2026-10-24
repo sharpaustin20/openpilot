@@ -24,6 +24,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.fan_mode import FAN_MODE_AUTO, read_fan_mode
+from openpilot.system.hardware.test_job import test_job_active
 from openpilot.system.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -55,6 +56,9 @@ else:
   })
 
 # Override to highest thermal band when offroad and above this temp
+# test job mode stays off in the car below this low-passed battery voltage (the 11.8 V shutdown is separate)
+TEST_JOB_MIN_CAR_VOLTAGE_MV = 12000
+
 OFFROAD_DANGER_TEMP = 85 if HARDWARE.get_device_type() == "mici" else 75
 
 prev_offroad_states: dict[str, tuple[bool, str | None]] = {}
@@ -184,6 +188,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   in_car = False
   engaged_prev = False
   pwrsave = False
+  test_job_speed_prev = None
   offroad_cycle_count = 0
 
   params = Params()
@@ -271,7 +276,10 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # Auto (default, also on any missing/invalid setting) is the stock fan logic without the offroad cap
     fan_mode = read_fan_mode()
-    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], fan_mode)
+    # test job mode: car off only, and not on a low car battery
+    test_job = (not onroad_conditions["ignition"] and test_job_active() and
+                not (in_car and power_monitor.car_voltage_mV < TEST_JOB_MIN_CAR_VOLTAGE_MV))
+    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], fan_mode, test_job)
 
     is_offroad_for_5_min = (started_ts is None) and ((not started_seen) or (off_ts is None) or (time.monotonic() - off_ts > 60 * 5))
     if is_offroad_for_5_min and offroad_comp_temp > OFFROAD_DANGER_TEMP:
@@ -330,8 +338,8 @@ def hardware_thread(end_event, hw_queue) -> None:
     if show_alert:
       msg.deviceState.fanSpeedPercentDesired = 100
 
-    # testing/manual fan modes: full fan in any overheated/critical band, onroad or offroad
-    if fan_mode != FAN_MODE_AUTO and thermal_status >= ThermalStatus.overheated:
+    # testing/manual fan modes and test jobs: full fan in any overheated/critical band, onroad or offroad
+    if (fan_mode != FAN_MODE_AUTO or test_job) and thermal_status >= ThermalStatus.overheated:
       msg.deviceState.fanSpeedPercentDesired = 100
 
     # Handle offroad/onroad transition
@@ -356,9 +364,16 @@ def hardware_thread(end_event, hw_queue) -> None:
         pass
 
     should_pwrsave = not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
-    if should_pwrsave != pwrsave or (count == 0):
-      HARDWARE.set_power_save(should_pwrsave)
+    # test job: full speed on all cores. Once overheated/critical (offroad that includes the 75 C
+    # offroad danger temp), the onroad 1689 MHz cap for the rest of the job
+    test_job_speed = None
+    if test_job:
+      hot = thermal_status >= ThermalStatus.overheated or test_job_speed_prev == "capped"
+      test_job_speed = "capped" if hot else "full"
+    if should_pwrsave != pwrsave or test_job_speed != test_job_speed_prev or (count == 0):
+      HARDWARE.set_power_save(should_pwrsave, test_job_speed=test_job_speed)
     pwrsave = should_pwrsave
+    test_job_speed_prev = test_job_speed
 
     if should_start:
       off_ts = None

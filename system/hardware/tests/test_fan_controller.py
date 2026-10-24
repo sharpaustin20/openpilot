@@ -118,3 +118,20 @@ class TestTestingFan:
     for t in [30, 50, 70, 85, 95, 105, 110, 90, 60]:
       for _ in range(200):
         assert testing.update(t, ignition, FAN_MODE_AUTO_TESTING) >= stock.update(t, ignition)
+
+
+class TestTestJobFan:
+  @pytest.mark.parametrize("fan_mode", [FAN_MODE_AUTO, FAN_MODE_AUTO_TESTING, 0, 20, 100])
+  def test_never_below_testing_curve(self, mocker, fan_mode):
+    job = patched_controller(mocker, FanController)
+    testing = patched_controller(mocker, FanController)
+    for t in [40, 55, 65, 80, 90, 70, 50]:
+      out = job.update(t, False, fan_mode, test_job=True)
+      assert out >= testing.update(t, False, FAN_MODE_AUTO_TESTING)
+      assert out >= (fan_mode if fan_mode >= 0 else 0)
+
+  def test_off_is_unchanged(self, mocker):
+    a = patched_controller(mocker, FanController)
+    b = patched_controller(mocker, FanController)
+    for t in [40, 60, 80, 95, 70]:
+      assert a.update(t, False, FAN_MODE_AUTO) == b.update(t, False, FAN_MODE_AUTO, test_job=False)
