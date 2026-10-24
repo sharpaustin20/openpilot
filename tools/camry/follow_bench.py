@@ -36,26 +36,27 @@ TUNES = {
   "PR7 1.0":        ([40, 60], [1.0, 1.45]),
   "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
 }
-# settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have glide on)
+# settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have both on)
 OFF = cp.PersonalizedSettings(glide=False, soft_plan=False)
 GLIDE = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=False)
 SOFT = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=True)
+DEFAULTS = cp.PersonalizedSettings()   # what the car runs after the update with no settings file
 SETTINGS = {
   "0.8 + glide":    (TUNES["0.8 to 35"], GLIDE),
   "0.8 + glide+soft": (TUNES["0.8 to 35"], SOFT),
-  "standard + glide": (TUNES["stock 1.25"], GLIDE),   # table unused: Standard and Relaxed keep their stock gaps
-  "relaxed + glide":  (TUNES["stock 1.25"], GLIDE),
+  "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
+  "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
 # glide in the other distance modes: the Plant's personality per tune (default Aggressive)
-PERSONALITIES = {"standard": log.LongitudinalPersonality.standard, "standard + glide": log.LongitudinalPersonality.standard,
-                 "relaxed": log.LongitudinalPersonality.relaxed, "relaxed + glide": log.LongitudinalPersonality.relaxed}
+PERSONALITIES = {"standard": log.LongitudinalPersonality.standard, "standard + defaults": log.LongitudinalPersonality.standard,
+                 "relaxed": log.LongitudinalPersonality.relaxed, "relaxed + defaults": log.LongitudinalPersonality.relaxed}
 TUNES["standard"] = TUNES["stock 1.25"]
 TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
 # GLIDE CHECK: each glide tune against the same gaps without glide
-BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "standard + glide": "standard", "relaxed + glide": "relaxed",
-           "file": "0.8 to 35"}
+BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "standard + defaults": "standard",
+           "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
 CUR_PERSONALITY = [AGG]
 BRAKE_A = -0.4   # m/s^2, car decel counted as "braking" in the brake-time metric

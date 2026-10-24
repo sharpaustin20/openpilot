@@ -12,8 +12,9 @@ learning job's suggestions:
   target, caps braking in a light zone below it, and passes the MPC output through unchanged below the
   band, when closing fast, when the lead brakes, right after a cut-in, or for anything that isn't the
   lead (curves, stops, e2e). It only ever makes a braking request less firm.
-- soft plan (option C1, off by default): while glide may act, the MPC's weight on holding the exact
-  distance is lowered, so the plan itself glides. Its one-sided danger-zone penalty is unchanged.
+- soft plan (option C1, on by default): while glide may act, the MPC's weight on holding the exact
+  distance is lowered, so the plan itself glides. Its one-sided danger-zone penalty is unchanged. The
+  learning job tunes the strength (firmer after brake takeovers inside the band, softer without them).
 FCW is computed by the MPC and is untouched by all of it.
 
 Settings live in a file, not Params: this branch is a prebuilt release, so Params keys are compiled
@@ -56,7 +57,7 @@ STATE_WRITE_INTERVAL = 1.0     # s
 BAND_RELATIVE = "relative"  # zones measured from the profile's target gap
 BAND_FIXED = "fixed"        # zones at fixed gaps in seconds
 
-BOOLS = ("personalized", "glide", "soft_plan", "learn")
+BOOLS = ("personalized", "glide", "soft_plan", "learn", "auto_apply")
 
 
 @dataclass
@@ -73,9 +74,10 @@ class PersonalizedSettings:
   light_brake: float = -0.8       # m/s^2, strongest braking asked for in the light zone
   min_ttc_s: float = 6.0          # s, glide only while time to collision is above this
   coast_accel: float = -0.3       # m/s^2, request while coasting (Camry's own coast on flat road)
-  soft_plan: bool = False
+  soft_plan: bool = True
   soft_distance_factor: float = 0.3  # weight on holding the exact distance while in the glide band (1.0 = stock)
-  learn: bool = True              # run the learning job while parked (writes suggestions only)
+  learn: bool = True              # run the learning job while parked (writes suggestions)
+  auto_apply: bool = False        # let the learning job apply its suggestions itself (one step each, history kept)
 
 
 # field -> (min, max)
@@ -183,7 +185,8 @@ def read_json(path: str, limit: int = 65536):
 
 HISTORY_KEEP = 5
 # fields the learning job may suggest, with the largest change allowed per Apply
-SUGGESTABLE = {"follow_s": 0.1, "coast_margin_s": 0.1, "light_width_s": 0.1, "light_brake": 0.2, "min_ttc_s": 1.0, "coast_accel": 0.2}
+SUGGESTABLE = {"follow_s": 0.1, "coast_margin_s": 0.1, "light_width_s": 0.1, "light_brake": 0.2, "min_ttc_s": 1.0, "coast_accel": 0.2,
+               "soft_distance_factor": 0.1}
 
 
 def read_suggested(path: str | None = None) -> dict | None:

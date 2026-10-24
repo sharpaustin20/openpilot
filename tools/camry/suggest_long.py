@@ -1,6 +1,7 @@
 # Turns a driver_profile.py result into suggested Personalized settings, with the evidence for each change.
-# Writes only the suggestion file (and a small per-route history); nothing changes on the car until the
-# driver taps Apply on the Personalized page, and that limits every step (camry_personalized.SUGGESTABLE).
+# Writes the suggestion file (and a small per-route history); nothing changes on the car until the driver taps
+# Apply on the Personalized page, which limits every step (camry_personalized.SUGGESTABLE). With the page's
+# "Apply Automatically" on, the same limited step is applied here, and the previous settings are kept for Undo.
 #
 #   PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 tools/camry/suggest_long.py /tmp/driver_profile.json
 # Options: --settings FILE, --out FILE (suggestion), --history FILE (per-route stats), --print-only
@@ -19,6 +20,12 @@ MIN_STEADY = 30          # steady-gap samples per speed bin before the manual ga
 STEP_S = 0.05            # s, one step on the follow table (Apply allows up to 0.1)
 # driver_profile speed bins -> the follow table point they inform (mph)
 BIN_TO_BP = {"20-35": 35, "35-50": 40, "50-65": 60, "65-+": 60}
+# soft plan strength (soft_distance_factor): firmer after brake takeovers inside the glide band, softer after a long
+# stretch engaged without one; the learner never goes below SOFT_FLOOR
+STOCK_T_FOLLOW = {1: 1.45, 2: 1.75}   # personality raw -> stock gap (standard, relaxed); 0 = the Personalized table
+SOFT_STEP = 0.1
+SOFT_FLOOR = 0.2
+SOFT_RELAX_ENGAGED_S = 3600
 
 
 def pct(xs, p):
@@ -124,6 +131,35 @@ def suggest_glide(tot, settings):
   return out
 
 
+def suggest_soft(tot, settings):
+  """Soft plan strength: one step firmer after brake takeovers inside the glide band, one step softer after an hour
+  or more engaged (in the drives being learned from) without one."""
+  if not settings.soft_plan or settings.band != cp.BAND_RELATIVE:
+    return []
+  bp_mph, vals = follow_table(settings)
+  in_band = []
+  for e in tot.get("brake_takeovers", []):
+    if not (e.get("same_lead") and e.get("gap_s") is not None):
+      continue
+    tf = STOCK_T_FOLLOW.get(e.get("personality")) or float(np.interp(e["mph"], bp_mph, vals))
+    coast_to = tf - settings.coast_margin_s
+    if coast_to - settings.light_width_s - 0.05 <= e["gap_s"] <= coast_to + 0.05:
+      in_band.append(e["gap_s"])
+  cur = settings.soft_distance_factor
+  engaged = sum(r.get("engaged_s", 0) for r in tot.get("per_route", {}).values())
+  if len(in_band) >= MIN_EVENTS_SAFETY:
+    new = round(min(cur + SOFT_STEP, 1.0), 2)
+    why = f"{len(in_band)} brake takeover(s) inside the glide band, gap {pct(in_band, 50):.2f} s: firmer plan"
+  elif not in_band and engaged >= SOFT_RELAX_ENGAGED_S:
+    new = round(max(cur - SOFT_STEP, SOFT_FLOOR), 2)
+    why = f"{engaged / 60:.0f} min engaged with no brake takeover inside the glide band: softer plan"
+  else:
+    return []
+  if abs(new - cur) < 0.05:
+    return []
+  return [dict(field="soft_distance_factor", to=new, why=why, **{"from": cur})]
+
+
 def update_history(tot, path):
   hist = cp.read_json(path) or {}
   routes = hist.get("routes", {})
@@ -163,6 +199,7 @@ def main():
   if fo:
     changes.append(fo)
   changes += suggest_glide(tot, settings)
+  changes += suggest_soft(tot, settings)
   changes = list({c["field"]: c for c in changes}.values())   # one change per field
   routes = update_history(tot, a.history) if not a.print_only else {**(cp.read_json(a.history) or {}).get("routes", {}), **tot.get("per_route", {})}
   sug = dict(made=time.time(), routes=tot.get("routes", []), changes=changes, stats=rates(routes))
@@ -172,6 +209,13 @@ def main():
   if not changes:
     print("  no change suggested")
   if not a.print_only:
+    if settings.auto_apply and changes:
+      # "Apply Automatically" is on: same limited step as the page's Apply button, previous file kept for Undo
+      new = cp.apply_suggested(sug, settings)
+      if new != settings:
+        cp.save_with_history(new, a.settings)
+        sug["applied"] = time.time()
+        print("applied automatically (Apply Automatically is on); the previous settings are kept for Undo")
     tmp = f"{a.out}.tmp"
     with open(tmp, "w") as f:
       json.dump(sug, f, indent=1)

@@ -35,6 +35,7 @@ NUMBER_OPTIONS = {
 FIELD_NAMES = {
   "follow_s": "follow gap", "coast_margin_s": "coast zone starts", "light_width_s": "light-brake zone width",
   "light_brake": "light braking limit", "min_ttc_s": "glide only above TTC", "coast_accel": "coast decel",
+  "soft_distance_factor": "soft plan strength",
 }
 
 
@@ -130,10 +131,14 @@ class PersonalizedLayout(Widget):
        "right after a cut-in, or below 11 mph. Only ever asks for less braking; forward collision warning is unchanged."),
       ("soft_plan", "Soft Plan",
        "The planner itself cares less about holding the exact distance while in the glide band, so it plans the glide " +
-       "instead of braking to win the gap back. The too-close penalty is unchanged."),
+       "instead of braking to win the gap back. The too-close penalty is unchanged. On by default; the learner tunes its " +
+       "strength: firmer after brake takeovers inside the glide band, softer after an hour engaged without one."),
       ("learn", "Learn After Drives",
        "While parked (10 min after the car is off, battery above 12.2 V, device below 60 °C), look at your gas presses, brake takeovers, " +
-       "distance-button changes and manual driving, and suggest small changes below. Nothing changes until you tap Apply."),
+       "distance-button changes and manual driving, and suggest small changes below."),
+      ("auto_apply", "Apply Automatically",
+       "Let the learner apply its suggestions itself after each parked run: one small step per setting, with the previous " +
+       "settings kept so Undo works. Off = the page shows them and you tap Apply."),
     ):
       self._toggles[field] = self._toggle(field, title, desc)
 
@@ -154,6 +159,7 @@ class PersonalizedLayout(Widget):
       self._toggles["learn"],
       text_item(lambda: tr("Interventions"), self._interventions_text,
                 description=lambda: tr("Gas presses and brake takeovers per engaged hour, last drive and last 5 drives.")),
+      self._toggles["auto_apply"],
       button_item_sp(lambda: tr("Suggested From Your Drives"), lambda: tr("Apply"), self._suggested_text, callback=self._apply),
       button_item_sp(lambda: tr("Undo Last Apply"), lambda: tr("Revert"), self._history_text, callback=self._revert),
     ]
@@ -201,7 +207,7 @@ class PersonalizedLayout(Widget):
     ch = self._sug.get("changes", [])
     if not ch:
       return tr("no change suggested")
-    parts = []
+    parts = [tr("applied automatically after your last drive (Undo below):")] if self._sug.get("applied") else []
     for c in ch[:3]:
       name = FIELD_NAMES.get(c.get("field"), c.get("field"))
       if c.get("field") == "follow_s":
@@ -219,7 +225,7 @@ class PersonalizedLayout(Widget):
   # ---- actions ----
   def _apply(self):
     self._refresh_sug()
-    if not self._sug or not self._sug.get("changes"):
+    if not self._sug or not self._sug.get("changes") or self._sug.get("applied"):
       return
     try:
       new = cp.apply_suggested(self._sug, self.store.s)

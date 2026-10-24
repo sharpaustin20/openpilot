@@ -11,8 +11,9 @@ Started by manager only while offroad (process_config.py). Every 10 s it checks,
   - there are drives it hasn't learned from yet                   otherwise idle
 Then it runs driver_profile.py + suggest_long.py through system/hardware/test_job.py (8 cores, testing fan curve)
 at the lowest CPU priority, in its own process group. The job is killed at once if the car turns on, if the
-device passes STOP_TEMP_C, or when manager stops this process. It writes only /data/camry_long_suggested.json
-and /data/camry_long_learned.json; the live settings are never touched here.
+device passes STOP_TEMP_C, or when manager stops this process. It writes /data/camry_long_suggested.json and
+/data/camry_long_learned.json; the live settings change only if "Apply Automatically" is on (suggest_long.py then
+applies the same limited step as the page's Apply button and keeps the previous file for Undo).
 """
 import os
 import signal

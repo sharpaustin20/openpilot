@@ -34,7 +34,7 @@ class TestSettings:
     p.write_text("{not json")
     assert read_settings(str(p)) == PersonalizedSettings()
     d = PersonalizedSettings()
-    assert d.personalized and d.glide and d.learn and not d.soft_plan   # Personalized replaces Aggressive; glide in every mode
+    assert d.personalized and d.glide and d.soft_plan and d.learn and not d.auto_apply   # Personalized replaces Aggressive; glide everywhere
     assert parse_settings([1, 2]) == PersonalizedSettings()
 
   def test_clamped(self):

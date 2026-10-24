@@ -85,10 +85,12 @@ Personal sunnypilot branch for one car:
      harder than -1.0 m/s², right after a cut-in, below 11 mph, or for
      anything that isn't the lead. It only ever asks for less braking;
      FCW and stopping are untouched.
-   - **Soft plan** (off by default): while glide may act, the planner's
+   - **Soft plan** (on by default): while glide may act, the planner's
      weight on holding the exact distance is lowered (a runtime weight, no
      solver rebuild), so the plan itself glides. The too-close penalty is
-     unchanged.
+     unchanged. The learner tunes the strength: one step firmer after
+     brake takeovers inside the glide band, one step softer after an hour
+     engaged without one (never below 0.2).
    - **Settings** live in `/data/camry_long.json` (not a Params key, as with
      the fan page), read once per drive; only switching Glide or Soft Plan
      off applies mid-drive. Every value is validated and clamped; the gap
@@ -104,7 +106,9 @@ Personal sunnypilot branch for one car:
      brake takeovers, your manual gaps, your coasts), and interventions
      per engaged hour. **Apply** moves each value at most one step (0.1 s
      gap, 0.2 m/s²) and keeps the last 5 versions for **Revert**. Nothing
-     changes without a tap. The PCM brake-light check (0x3B7
+     changes without a tap unless **Apply Automatically** (off by default)
+     is on; then the learner applies the same limited step itself after
+     each parked run and the page says so. The PCM brake-light check (0x3B7
      `BRAKE_LIGHTS_ACC`) is wired but inactive: `tools/camry/probe_3b7.py`
      found no bit of 0x3B7 that tracks braking on this car (2026-10-24).
    - Bench: `tools/camry/follow_bench.py` runs glide on/off through the

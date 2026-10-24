@@ -251,7 +251,8 @@ def analyze(route, ticks):
         gap_s=round(t_equiv(k), 2) if good_lead(k) else None, vrel=round(k["vrel"], 1) if good_lead(k) else None,
         ttc=round(ttc(k), 1) if good_lead(k) and ttc(k) else None,
         planner_a=round(prev["a_target"], 2) if prev["a_target"] is not None else None,
-        driver_min_a=round(min(after), 2), fcw_before=any(x["plan_fcw"] for x in ticks[max(0, i - W):i]), same_lead=ok))
+        driver_min_a=round(min(after), 2), fcw_before=any(x["plan_fcw"] for x in ticks[max(0, i - W):i]), same_lead=ok,
+        personality=prev["personality"]))
 
     if k["personality"] is not None and prev["personality"] is not None and k["personality"] != prev["personality"]:
       out["personality_changes"].append(dict(t=round(k["t"], 1), mph=round(k["v"] * MPH),
