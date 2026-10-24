@@ -95,6 +95,13 @@ def _fmt_table(bp_mph, vals) -> str:
   return ", ".join(f"{v:.2f} s @ {b:.0f} mph" for b, v in zip(bp_mph, vals, strict=True))
 
 
+def _change_text(c: dict) -> str:
+  name = FIELD_NAMES.get(c.get("field"), c.get("field"))
+  if c.get("field") == "follow_s":
+    return f"{name}: {_fmt_table(c.get('bp_mph', ()), c.get('to', ()))}"
+  return f"{name}: {c.get('from')} -> {c.get('to')}"
+
+
 def _per_hour(x) -> str:
   return "--" if x is None else f"{x:.1f}/h"
 
@@ -206,21 +213,18 @@ class PersonalizedLayout(Widget):
       return tr("none yet")
     ch = self._sug.get("changes", [])
     gate = self._sug.get("gate") or {}
+    dropped = self._sug.get("dropped") or []
     if not ch:
-      if self._sug.get("dropped") and gate.get("verdict") == "fail":
+      if dropped and gate.get("verdict") == "fail":
         return tr("dropped: the bench showed more FCW, crashes or a smaller gap: ") + "; ".join(gate.get("worse", [])[:2])
       return tr("no change suggested")
     parts = [tr("applied automatically after your last drive (Undo below):")] if self._sug.get("applied") else []
     if gate.get("verdict") != "pass":
       parts.append(tr("not benched yet, so Apply is off:"))
     for c in ch[:3]:
-      name = FIELD_NAMES.get(c.get("field"), c.get("field"))
-      if c.get("field") == "follow_s":
-        parts.append(f"{name}: {_fmt_table(c.get('bp_mph', ()), c.get('to', ()))}")
-      else:
-        parts.append(f"{name}: {c.get('from')} -> {c.get('to')}")
-      if c.get("why"):
-        parts[-1] += f" ({c['why']})"
+      parts.append(_change_text(c) + (f" ({c['why']})" if c.get("why") else ""))
+    for c in dropped[:2]:   # benched separately and failed, or passes alone but not with the changes above
+      parts.append(tr("dropped ") + _change_text(c) + f" ({c.get('dropped') or tr('failed the bench')})")
     return "<br>".join(parts)
 
   def _history_text(self) -> str:

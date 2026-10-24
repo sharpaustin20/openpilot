@@ -225,3 +225,48 @@ class TestSafeGlide:
     inner.distance_cost_factor = lambda *_: 0.0
     assert g.distance_cost_factor(True) == 1.0
     assert not g.failed
+
+
+class TestSuggestionGate:
+  """suggest_long.gate_in_groups: after the whole candidate fails the bench, offer the group that passes on its own."""
+  CHANGES = [{"field": "follow_s", "bp_mph": [35, 40, 60], "to": [0.8, 0.95, 1.45], "from": [0.8, 1.0, 1.45]},
+             {"field": "coast_margin_s", "from": 0.2, "to": 0.1},
+             {"field": "min_ttc_s", "from": 6.0, "to": 7.0}]
+  FULL = {"verdict": "fail", "worse": ["personalized, lead brakes 5.0 from 45: FCW 256 > 255"]}
+  CUR = PersonalizedSettings(follow_bp_mph=(35.0, 40.0, 60.0), follow_s=(0.8, 1.0, 1.45))
+
+  @staticmethod
+  def _sl():
+    from openpilot.tools.camry import suggest_long
+    return suggest_long
+
+  def test_glide_group_offered_gap_table_dropped(self):
+    sl = self._sl()
+    calls = []
+
+    def fake_gate(cur, cand, all_modes):
+      calls.append((cand.follow_s, cand.coast_margin_s, cand.min_ttc_s, all_modes))
+      return {"verdict": "pass", "totals": {}} if cand.follow_s == cur.follow_s else self.FULL
+
+    offered, dropped, gate, gates = sl.gate_in_groups(self.CUR, self.CHANGES, self.FULL, fake_gate)
+    assert [c["field"] for c in offered] == ["coast_margin_s", "min_ttc_s"] and gate["verdict"] == "pass"
+    assert [c["field"] for c in dropped] == ["follow_s"] and "FCW 256 > 255" in dropped[0]["dropped"]
+    assert len(calls) == 2 and calls[0][3] is True and calls[1][3] is False   # glide group in all modes, table alone in one
+    assert calls[0][0] == (0.8, 1.0, 1.45) and calls[0][1] == 0.1 and calls[1][0] == (0.8, 0.95, 1.45) and calls[1][1] == 0.2
+
+  def test_never_offers_both_groups(self):
+    sl = self._sl()
+    offered, dropped, gate, _ = sl.gate_in_groups(self.CUR, self.CHANGES, self.FULL, lambda *a: {"verdict": "pass"})
+    assert [c["field"] for c in offered] == ["coast_margin_s", "min_ttc_s"]
+    assert [c["field"] for c in dropped] == ["follow_s"] and "alone" in dropped[0]["dropped"]
+
+  def test_single_kind_is_not_rebenched(self):
+    sl = self._sl()
+    offered, dropped, gate, gates = sl.gate_in_groups(self.CUR, self.CHANGES[1:], self.FULL, lambda *a: pytest.fail("no rerun"))
+    assert offered == [] and gate is self.FULL and gates == {} and len(dropped) == 2 and "together" in dropped[0]["dropped"]
+
+  def test_all_fail(self):
+    sl = self._sl()
+    offered, dropped, gate, _ = sl.gate_in_groups(self.CUR, self.CHANGES, self.FULL, lambda *a: {"verdict": "fail", "worse": ["x: crash"]})
+    assert offered == [] and gate is self.FULL and [c["field"] for c in dropped] == ["coast_margin_s", "min_ttc_s", "follow_s"]
+    assert all(c["dropped"] == "the bench showed: x: crash" for c in dropped)

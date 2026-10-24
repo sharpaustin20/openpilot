@@ -112,12 +112,14 @@ Personal sunnypilot branch for one car:
      `suggest_long.py` runs `follow_bench.py --gate` on the candidate
      settings against the current ones (the full scenario set, in the same
      test job; in Standard and Relaxed too when a glide or soft plan value
-     changes): a warning or crash where the current settings had none
-     (or over 10% + 1 more warning frames), braking below -2.5 m/s² or a
-     gap under 0.6 s where the current settings had none, or a missed
-     steady gap, in any mode, drops the suggestion and the page says why.
-     Apply, manual or automatic, only accepts a suggestion the bench
-     passed. The PCM brake-light check (0x3B7
+     changes). The rule is strict: more collision-warning frames in any
+     scenario, a crash, braking below -2.5 m/s² or a gap under 0.6 s where
+     the current settings had none, or a missed steady gap, in any mode,
+     fails the candidate. If the whole set fails, the glide/soft plan
+     changes and the gap-table change are benched separately and the
+     group that passes is offered; the rest is shown as dropped with the
+     bench's reason. Apply, manual or automatic, only accepts a
+     suggestion the bench passed. The PCM brake-light check (0x3B7
      `BRAKE_LIGHTS_ACC`) is wired but inactive: `tools/camry/probe_3b7.py`
      found no bit of 0x3B7 that tracks braking on this car (2026-10-24).
    - Bench: `tools/camry/follow_bench.py` runs glide on/off through the

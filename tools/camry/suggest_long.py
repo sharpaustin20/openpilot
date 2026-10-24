@@ -2,6 +2,9 @@
 # Writes the suggestion file (and a small per-route history); nothing changes on the car until the driver taps
 # Apply on the Personalized page, which limits every step (camry_personalized.SUGGESTABLE). With the page's
 # "Apply Automatically" on, the same limited step is applied here, and the previous settings are kept for Undo.
+# Every suggestion is benched first (follow_bench.py --gate, strict: no extra FCW frame, crash, hard braking or close
+# gap anywhere). If the whole set fails, the glide/soft plan changes and the gap table change are benched separately
+# and the group that passes is offered; the rest is written under "dropped" with the bench's reason.
 #
 #   PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 tools/camry/suggest_long.py /tmp/driver_profile.json
 # Options: --settings FILE, --out FILE (suggestion), --history FILE (per-route stats), --print-only
@@ -182,6 +185,39 @@ def bench_gate(settings, candidate, all_modes):
     return dict(verdict="skipped", why=f"bench did not run: {e}")
 
 
+def _why(g):
+  return "; ".join(g["worse"][:2]) if g.get("worse") else str(g.get("why", "no verdict"))
+
+
+def gate_in_groups(settings, changes, full_gate, gate_fn=None):
+  """The whole candidate failed the bench. Bench two groups on their own: the glide/soft plan changes without the gap
+  table change, then the gap table change alone. Offer the first group that passes, never both (together is what
+  failed), and list the rest as dropped with the bench's reason. Returns (offered, dropped, gate of the offered group
+  or the full gate, group gates). At most two more bench runs."""
+  gate_fn = gate_fn or bench_gate
+  groups = [("glide and soft plan", [c for c in changes if c["field"] != "follow_s"]),
+            ("gap table", [c for c in changes if c["field"] == "follow_s"])]
+  full_why = "with all changes together the bench showed: " + _why(full_gate)
+  if any(not grp for _, grp in groups):   # one kind of change only: the group is the whole set, which failed
+    return [], [dict(c, dropped=full_why) for c in changes], full_gate, {}
+  offered, offered_gate, dropped, gates = [], None, [], {}
+  for name, grp in groups:
+    g = gate_fn(settings, cp.apply_suggested({"changes": grp}, settings), any(c["field"] != "follow_s" for c in grp))
+    gates[name] = g
+    if g.get("verdict") == "pass" and not offered:
+      offered, offered_gate = grp, g
+    elif g.get("verdict") == "pass":
+      dropped += [dict(c, dropped="passes the bench alone but not with the change(s) offered above; suggested again once those are applied") for c in grp]
+    else:
+      dropped += [dict(c, dropped="the bench showed: " + _why(g)) for c in grp]
+  return offered, dropped, offered_gate or full_gate, gates
+
+
+def _totals(g):
+  return "; ".join(f"{n}: crashes {t['crashes']}, FCW {t['fcw']}, min gap {t['min_gap_s']} s, braking {t['brake_s']} s"
+                   for n, t in g.get("totals", {}).items())
+
+
 def update_history(tot, path):
   hist = cp.read_json(path) or {}
   routes = hist.get("routes", {})
@@ -238,12 +274,17 @@ def main():
     gate = bench_gate(settings, cp.apply_suggested(sug, settings), all_modes)
     sug["gate"] = gate
     if gate["verdict"] == "fail":
-      sug["dropped"], sug["changes"] = changes, []
-      changes = []
-      print(f"bench gate: FAIL, suggestions dropped: {gate.get('worse')}")
+      print(f"bench gate: FAIL with all changes together: {gate.get('worse')}")
+      changes, sug["dropped"], sug["gate"], sug["gates"] = gate_in_groups(settings, changes, gate)
+      sug["changes"], sug["gate_full"] = changes, gate
+      for c in sug["dropped"]:
+        print(f"  dropped {c['field']}: {c['dropped']}")
+      if changes:
+        print("bench gate: PASS for " + ", ".join(c["field"] for c in changes) + " on their own (" + _totals(sug["gate"]) + ")")
+      else:
+        print("bench gate: every suggestion dropped")
     elif gate["verdict"] == "pass":
-      print("bench gate: PASS (" + "; ".join(f"{n}: crashes {t['crashes']}, FCW {t['fcw']}, min gap {t['min_gap_s']} s, braking {t['brake_s']} s"
-                                            for n, t in gate.get("totals", {}).items()) + ")")
+      print("bench gate: PASS (" + _totals(gate) + ")")
     else:
       print(f"bench gate: not run ({gate.get('why')}); suggestions kept but not applied automatically")
   if not a.print_only:
