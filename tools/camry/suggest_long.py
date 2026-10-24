@@ -7,11 +7,14 @@
 import argparse, json, os, sys, time
 from collections import defaultdict
 
+import numpy as np
+
 from openpilot.selfdrive.controls.lib import camry_personalized as cp
 
 MPH = 2.237
 MIN_EVENTS = 3           # matching events before a change is suggested
-MIN_EVENTS_SAFETY = 2    # brake takeovers: suggest sooner, since they mean "too close"
+MIN_EVENTS_SAFETY = 2    # brake takeovers at/under the target gap: suggest sooner, since they mean "too close"
+TTC_LATE_S = 15.0        # brake takeovers with a longer time to collision than this aren't about closing speed
 MIN_STEADY = 30          # steady-gap samples per speed bin before the manual gap counts
 STEP_S = 0.05            # s, one step on the follow table (Apply allows up to 0.1)
 # driver_profile speed bins -> the follow table point they inform (mph)
@@ -48,7 +51,8 @@ def suggest_follow(tot, settings):
     if e.get("same_lead") and e.get("gap_s") is not None and e.get("vrel", 0) is not None and e["vrel"] > -1.0:
       gas[bin_of(e["mph"])].append(e["gap_s"])
   for e in tot.get("brake_takeovers", []):
-    if e.get("same_lead") and e.get("gap_s") is not None:
+    # only takeovers at or under the table's gap count as "too close"; farther ones are late braking (see min_ttc_s)
+    if e.get("same_lead") and e.get("gap_s") is not None and e["gap_s"] <= float(np.interp(e["mph"], bp_mph, vals)) + 0.1:
       brake[bin_of(e["mph"])].append(e["gap_s"])
   manual = tot.get("steady_gap", {}).get("manual", {})
   for b, bp in BIN_TO_BP.items():
@@ -82,7 +86,7 @@ def suggest_glide(tot, settings):
     # how far under the profile's target gap the driver lifts off, and where he finally brakes
     under = []
     for c in coasts:
-      target = float(__import__("numpy").interp(c["mph"], bp_mph, vals))
+      target = float(np.interp(c["mph"], bp_mph, vals))
       under.append(target - c["gap_s"])
     margin = round(min(max(pct(under, 50), 0.0), 0.5), 2)
     if abs(margin - settings.coast_margin_s) >= 0.05:
@@ -110,11 +114,12 @@ def suggest_glide(tot, settings):
     out = [o for o in out if o["field"] != "coast_accel"]
     out.append(dict(field="coast_accel", to=coast_a, why=f"the car brakes for requests at or below {thr:.1f} m/s^2 (0x3B7)",
                     **{"from": settings.coast_accel}))
-  tk = [e["ttc"] for e in tot.get("brake_takeovers", []) if e.get("same_lead") and e.get("ttc")]
-  if len(tk) >= MIN_EVENTS_SAFETY:
-    ttc = round(min(max(pct(tk, 75) + 1.0, settings.min_ttc_s), 10.0))
+  # takeovers while closing on the lead: glide should stay out until a longer time to collision
+  tk = [e["ttc"] for e in tot.get("brake_takeovers", []) if e.get("same_lead") and e.get("ttc") and e["ttc"] <= TTC_LATE_S]
+  if len(tk) >= MIN_EVENTS:
+    ttc = float(round(min(max(pct(tk, 50) + 1.0, settings.min_ttc_s), 10.0)))
     if ttc > settings.min_ttc_s:
-      out.append(dict(field="min_ttc_s", to=ttc, why=f"{len(tk)} brake takeover(s) at TTC {pct(tk, 50):.1f} s",
+      out.append(dict(field="min_ttc_s", to=ttc, why=f"{len(tk)} brake takeover(s) while closing, TTC median {pct(tk, 50):.1f} s",
                       **{"from": settings.min_ttc_s}))
   return out
 
@@ -158,6 +163,7 @@ def main():
   if fo:
     changes.append(fo)
   changes += suggest_glide(tot, settings)
+  changes = list({c["field"]: c for c in changes}.values())   # one change per field
   routes = update_history(tot, a.history) if not a.print_only else {**(cp.read_json(a.history) or {}).get("routes", {}), **tot.get("per_route", {})}
   sug = dict(made=time.time(), routes=tot.get("routes", []), changes=changes, stats=rates(routes))
   print(f"{len(tot.get('routes', []))} route(s); interventions/h: last {sug['stats']['per_hour_last']}, last 5 {sug['stats']['per_hour_5']}")
