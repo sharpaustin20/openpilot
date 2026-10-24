@@ -58,6 +58,15 @@ Personal sunnypilot branch for one car:
      time are unchanged.
    - Fan page shows whether a test job is running and which cores are online.
 
+4. **Aggressive follows by speed** (`selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py`)
+   - Stock Aggressive is a flat 1.25 s gap. On this branch it is 1.0 s up
+     to 40 mph, blending to 1.45 s at 60 mph and above, fitted to the
+     driver's own manual following (`tools/camry/driver_profile.py`).
+   - The 1.0 s floor is deliberate until drives with the radar reader
+     show closing-speed braking is early enough to go closer.
+   - Standard and Relaxed are unchanged. Checked with
+     `tools/camry/follow_bench.py` (real planner vs. simulated leads).
+
 ## Updating
 
 This branch is pinned to v2026.002.002. To move to a newer sunnypilot
