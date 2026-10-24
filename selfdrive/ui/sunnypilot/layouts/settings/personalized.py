@@ -102,6 +102,24 @@ def _change_text(c: dict) -> str:
   return f"{name}: {c.get('from')} -> {c.get('to')}"
 
 
+MODE_NAMES = {"personalized": "Personalized", "standard": "Standard", "relaxed": "Relaxed"}
+
+
+def _bench_text(gate: dict) -> str:
+  """The gate's totals as one line: braking time now -> with the suggestion per benched mode (less braking is the glide
+  goal, and learned glide values can glide less than the defaults), and whether FCW or crashes moved."""
+  tot = gate.get("totals") or {}
+  pairs = [(tot.get(f"current/{m}"), tot.get(f"candidate/{m}"), MODE_NAMES[m]) for m in MODE_NAMES]
+  pairs = [(c, n, name) for c, n, name in pairs if c and n]
+  if not pairs:
+    return ""
+  text = tr("bench, braking time now -> with this: ") + ", ".join(f"{c.get('brake_s')} -> {n.get('brake_s')} s {name}" for c, n, name in pairs)
+  for key, label in (("fcw", "FCW"), ("crashes", tr("crashes"))):
+    a, b = sum(c.get(key, 0) for c, _, _ in pairs), sum(n.get(key, 0) for _, n, _ in pairs)
+    text += f"; {label} {a} -> {b}" if a != b else f"; {label} {tr('unchanged')}"
+  return text
+
+
 def _per_hour(x) -> str:
   return "--" if x is None else f"{x:.1f}/h"
 
@@ -223,6 +241,8 @@ class PersonalizedLayout(Widget):
       parts.append(tr("not benched yet, so Apply is off:"))
     for c in ch[:3]:
       parts.append(_change_text(c) + (f" ({c['why']})" if c.get("why") else ""))
+    if gate.get("verdict") == "pass" and _bench_text(gate):
+      parts.append(_bench_text(gate))
     for c in dropped[:2]:   # benched separately and failed, or passes alone but not with the changes above
       parts.append(tr("dropped ") + _change_text(c) + f" ({c.get('dropped') or tr('failed the bench')})")
     return "<br>".join(parts)
