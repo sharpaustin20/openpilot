@@ -1,9 +1,12 @@
 # Closed-loop following test bench: runs sunnypilot's real LongitudinalPlanner (MPC) against simulated leads
-# and compares follow-gap tunes for the Aggressive personality. Nothing is published or written:
-# no msgq sockets are opened, real-time pacing is disabled, and the gap table is swapped in-process only.
+# and compares follow-gap tunes for the Aggressive / Personalized slot, with and without glide and soft plan.
+# Nothing is published or written: no msgq sockets are opened, real-time pacing is disabled, and the gap table
+# and Personalized settings are swapped in-process only (the settings file on the device is never read here).
 #
 # Run with the car OFF (refuses if onroad), works on the stock branch (no install needed):
 #   cd /data/openpilot && OPENPILOT_PREFIX=lbench PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 /tmp/follow_bench.py
+# Options: --table FILE   also bench the Personalized settings file FILE (e.g. before tapping Apply)
+#          --quick        only the glide-relevant scenarios
 import os, sys
 os.environ.setdefault("OPENPILOT_PREFIX", "lbench")   # isolate params/msgq namespace from the real system
 
@@ -20,17 +23,37 @@ from cereal import log
 import openpilot.selfdrive.test.longitudinal_maneuvers.plant as plant_mod
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib import long_mpc
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+from openpilot.selfdrive.controls.lib import camry_personalized as cp
 
 MPH = 0.44704
 DT = 0.05
 AGG = log.LongitudinalPersonality.aggressive
 
-# candidate Aggressive tunes: (speed breakpoints in mph, t_follow values)
+# candidate tunes for the Aggressive / Personalized slot: (speed breakpoints in mph, t_follow values)
 TUNES = {
   "stock 1.25":     ([0], [1.25]),
   "PR7 1.0":        ([40, 60], [1.0, 1.45]),
   "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
 }
+# Personalized settings per tune (glide/soft plan); tunes not listed run with both off
+GLIDE = cp.PersonalizedSettings(personalized=True, glide=True)
+SOFT = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=True)
+SETTINGS = {
+  "0.8 + glide":    (TUNES["0.8 to 35"], GLIDE),
+  "0.8 + glide+soft": (TUNES["0.8 to 35"], SOFT),
+}
+for _name, (_tune, _st) in SETTINGS.items():
+  TUNES[_name] = _tune
+CUR_SETTINGS = [cp.PersonalizedSettings()]   # what make_planner gives the planner (per worker process)
+BRAKE_A = -0.4   # m/s^2, car decel counted as "braking" in the brake-time metric
+
+
+def add_table_tune(path):
+  """--table FILE: the Personalized settings file as its own tune, with its glide/soft plan settings."""
+  st = cp.read_settings(path)
+  bp, vals = cp.follow_table_ms(cp.PersonalizedSettings(**{**st.__dict__, "personalized": True}))
+  TUNES["file"] = ([b / MPH for b in bp], list(vals))
+  SETTINGS["file"] = (TUNES["file"], st)
 
 
 class FakeRk:
@@ -61,15 +84,25 @@ def _update(self, *a, **k):
 long_mpc.LongitudinalMpc.update = _update
 
 
-def set_tune(bp_mph, vals):
+def set_tune(bp_mph, vals, settings=None):
   bp = [b * MPH for b in bp_mph]
   stock = long_mpc.get_T_FOLLOW
-  def t_follow(personality=log.LongitudinalPersonality.standard, v_ego=None):
+  def t_follow(personality=log.LongitudinalPersonality.standard, v_ego=None, personalized=None):
     if personality == AGG:
       return float(np.interp(CUR_V[0] if v_ego is None else v_ego, bp, vals))
     return stock(personality)
   long_mpc.get_T_FOLLOW = t_follow
+  # the planner's own copy of the table (long_mpc.update reads self.personalized) and the glide settings
+  st = settings if settings is not None else cp.PersonalizedSettings()
+  CUR_SETTINGS[0] = cp.PersonalizedSettings(**{**st.__dict__, "follow_bp_mph": tuple(bp_mph), "follow_s": tuple(vals)})
   return stock
+
+
+def personalize(planner):
+  st = CUR_SETTINGS[0]
+  planner.glide = cp.GlideGovernor(dt=DT, live=False, settings=st)
+  planner.mpc.personalized = cp.follow_table_ms(st)   # None unless the tune's settings say Personalized
+  return planner
 
 
 CAR_MODE = os.environ.get("BENCH_CAR", "toyota")   # "honda" = the Plant's own CarParams, as in openpilot CI
@@ -115,12 +148,12 @@ def make_planner(v0):
   if CP_VARIANT.startswith("mix:"):   # e.g. mix:honda:id = Honda CP with the Camry's brand/fingerprint
     _, base, group = CP_VARIANT.split(":")
     CP, SP = mixed_cp(base, group)
-    return LongitudinalPlanner(CP, SP, init_v=v0)
+    return personalize(LongitudinalPlanner(CP, SP, init_v=v0))
   if CP_VARIANT == "honda_swap":   # Honda CP, but built through the same swap path as the Camry
     from opendbc.car.honda.values import CAR
     from opendbc.car.honda.interface import CarInterface
     CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
-    return LongitudinalPlanner(CP, CarInterface.get_non_essential_params_sp(CP, CAR.HONDA_CIVIC), init_v=v0)
+    return personalize(LongitudinalPlanner(CP, CarInterface.get_non_essential_params_sp(CP, CAR.HONDA_CIVIC), init_v=v0))
   from opendbc.car.toyota.values import CAR
   from opendbc.car.toyota.interface import CarInterface
   CP = CarInterface.get_non_essential_params(CAR.TOYOTA_CAMRY)
@@ -136,7 +169,7 @@ def make_planner(v0):
     CP.autoResumeSng = True
   CP_SP = CarInterface.get_non_essential_params_sp(CP, CAR.TOYOTA_CAMRY)
   CP.openpilotLongitudinalControl = True   # get_non_essential_params_sp resets this to False, so set it after
-  return LongitudinalPlanner(CP, CP_SP, init_v=v0)
+  return personalize(LongitudinalPlanner(CP, CP_SP, init_v=v0))
 
 
 def use_camry_planner():
@@ -158,7 +191,7 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   p = make_plant(v0, d0, e2e)
   p.v_lead_prev = v0
   settle = 40.0
-  rows, fcw = [], 0
+  rows, fcw, glide_s = [], 0, 0.0
   while p.current_time < settle + duration:
     t = p.current_time
     vl = float(lead_profile(t - settle)) if t >= settle else v0
@@ -167,13 +200,15 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
       d = out["distance_lead"] - out["distance"]
       rows.append((d, out["speed"], vl, out["acceleration"]))
       fcw += bool(out["fcw"])
+      glide_s += DT * bool(getattr(getattr(p.planner, "glide", None), "active", False))
   a = np.array(rows)
   d, v, vl, acc = a.T
   closing = vl - v
   ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
   expect = long_mpc.get_T_FOLLOW(AGG, v[0]) * v[0] + long_mpc.STOP_DISTANCE
   return dict(gap_m=d[0], expect_m=expect, gap_s=d[0] / max(v[0], 0.1), min_gap_m=d.min(), min_ttc=ttc.min(),
-              min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4))
+              min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4),
+              brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, end_gap_s=d[-1] / max(v[-1], 0.1))
 
 
 def scenarios():
@@ -187,6 +222,21 @@ def scenarios():
       S.append((f"lead brakes {dec} m/s2 from {mph} mph to stop", lambda t, v=v, dec=dec: max(0.0, v - dec * t), v, None, 25.0))
   v60 = 60 * MPH
   S.append(("lead slows 60->40 mph at 1.5 m/s2", lambda t: max(40 * MPH, v60 - 1.5 * t), v60, None, 25.0))
+  S += glide_scenarios()
+  return S
+
+
+def glide_scenarios():
+  """Where glide should show: small speed differences and gentle lead changes behind the same lead."""
+  S = []
+  for mph in (30, 45, 65):
+    v = mph * MPH
+    for dv in (2, 5):   # lead settles dv mph slower: we close slowly, then should glide into the new gap
+      S.append((f"lead drops {dv} mph from {mph} mph and holds", lambda t, v=v, dv=dv: v - min(dv * MPH, 0.7 * t), v, None, 30.0))
+    # lead speed wobbles +-2 mph with a 20 s period: the gap hunting that makes stock brake all the time
+    S.append((f"lead wobbles +-2 mph at {mph} mph", lambda t, v=v: v + 2 * MPH * np.sin(2 * np.pi * t / 20.0), v, None, 40.0))
+    # lead brakes moderately for 3 s then holds: glide must hand over to real braking
+    S.append((f"lead brakes 1.5 m/s2 for 3 s at {mph} mph", lambda t, v=v: v - 1.5 * min(t, 3.0), v, None, 25.0))
   return S
 
 
@@ -213,7 +263,7 @@ def cut_in(v_ego_mph, d_cut, dv):
 def job(args):
   name, idx = args
   bp, vals = TUNES[name]
-  set_tune(bp, vals)   # each worker process gets its own copy of the patched module
+  set_tune(bp, vals, SETTINGS[name][1] if name in SETTINGS else None)   # each worker process gets its own copy of the patched module
   sc = scenarios()
   if idx < len(sc):
     title, prof, v0, d0, dur = sc[idx]
@@ -222,13 +272,18 @@ def job(args):
   return name, f"cut-in {dcut} m ahead, {dv} m/s slower at {mph} mph", cut_in(mph, dcut, dv)
 
 
-CUT_INS = ((40, 15, 3), (60, 25, 4))
+CUT_INS = ((40, 15, 3), (60, 25, 4), (45, 28, 1), (45, 20, 2))   # the last two: ~1.1 s and ~0.7 s gaps at 45 mph
+GLIDE_ONLY = [t for t, *_ in glide_scenarios()]
 
 
 def main():
   from multiprocessing import Pool
+  if "--table" in sys.argv:
+    add_table_tune(sys.argv[sys.argv.index("--table") + 1])
+  quick = "--quick" in sys.argv
   n_jobs = len(scenarios()) + len(CUT_INS)
-  jobs = [(name, i) for name in TUNES for i in range(n_jobs)]
+  jobs = [(name, i) for name in TUNES for i in range(n_jobs)
+          if not quick or i >= len(scenarios()) or scenarios()[i][0] in GLIDE_ONLY or scenarios()[i][0].startswith("steady")]
   res = {name: {} for name in TUNES}
   order = [t for t, *_ in scenarios()] + [f"cut-in {d} m ahead, {dv} m/s slower at {m} mph" for m, d, dv in CUT_INS]
   print(f"{len(jobs)} runs on {os.cpu_count()} cores", flush=True)
@@ -237,7 +292,7 @@ def main():
       res[name][title] = m
       if k % 10 == 0:
         print(f"  {k}/{len(jobs)}", flush=True)
-  res = {n: {t: r[t] for t in order} for n, r in res.items()}
+  res = {n: {t: r[t] for t in order if t in r} for n, r in res.items()}
 
   names = list(TUNES)
   print("\nsteady gap at speed (m / s):")
@@ -259,6 +314,37 @@ def main():
   worst = {n: dict(min_a=min(m["min_a"] for m in res[n].values()), fcw=sum(m["fcw"] for m in res[n].values()),
                    crashes=sum(m["crash"] for m in res[n].values())) for n in names}
   print("\nsummary: " + " | ".join(f"{n}: hardest {w['min_a']:.2f}, FCW frames {w['fcw']}, crashes {w['crashes']}" for n, w in worst.items()))
+
+  # glide: braking time and gap behind the same lead, glide profiles vs their table without glide
+  print("\nglide scenarios (seconds braking harder than %.1f m/s2 / seconds gliding / gap at end s / min gap s):" % BRAKE_A)
+  for k in GLIDE_ONLY:
+    if k not in res[names[0]]:
+      continue
+    print(f"  {k}")
+    for n in names:
+      m = res[n].get(k)
+      if m:
+        v0 = k.split(" mph")[0].split()[-1]
+        print(f"    {n:16s} brake {m['brake_s']:5.1f} s  glide {m['glide_s']:5.1f} s  end gap {m['end_gap_s']:.2f}  min gap {m['min_gap_m'] / max(float(v0) * MPH, 0.1):.2f}")
+  base = "0.8 to 35" if "0.8 to 35" in res else names[0]
+  print("\nGLIDE CHECK vs '%s' (no new FCW frames, no new crashes, braking no harder than -2.5 where the base stayed above it):" % base)
+  for n in SETTINGS:
+    if n not in res:
+      continue
+    worse = []
+    for k, m in res[n].items():
+      b = res[base].get(k)
+      if b is None:
+        continue
+      if m["fcw"] > b["fcw"]:
+        worse.append(f"{k}: FCW {m['fcw']} > {b['fcw']}")
+      if m["crash"] and not b["crash"]:
+        worse.append(f"{k}: crash")
+      if m["min_a"] < -2.5 <= b["min_a"]:
+        worse.append(f"{k}: decel {m['min_a']:.2f}")
+    brake_base = sum(res[base][k]["brake_s"] for k in GLIDE_ONLY if k in res[base])
+    brake_n = sum(res[n][k]["brake_s"] for k in GLIDE_ONLY if k in res[n])
+    print(f"  {n:16s} {'PASS' if not worse else 'FAIL'}  braking in glide scenarios {brake_n:.0f} s vs {brake_base:.0f} s" + (f"  {worse}" if worse else ""))
 
 
 def diag_job(args):

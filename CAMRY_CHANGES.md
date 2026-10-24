@@ -68,6 +68,43 @@ Personal sunnypilot branch for one car:
    - Standard and Relaxed are unchanged. Checked with
      `tools/camry/follow_bench.py` (real planner vs. simulated leads).
 
+5. **Personalized profile: glide, soft plan, learning** (`selfdrive/controls/lib/camry_personalized.py`,
+   `selfdrive/controls/lib/longitudinal_planner.py`, `long_mpc.py`, Settings > Personalized,
+   `tools/camry/learnd.py`, `tools/camry/suggest_long.py`, `tools/camry/driver_profile.py`)
+   - A **Personalized** profile takes the Aggressive slot of the distance
+     button when switched on (Personalized, Standard, Relaxed). Off, or
+     with no settings file, Aggressive is stock (flat 1.25 s). The
+     speed-based gap table from item 4 is now the Personalized default.
+   - **Glide:** behind a lead in the same lane, small braking requests are
+     raised to the car's coast decel while the gap is a little under the
+     target (coast zone), braking is capped in a light zone below it, and
+     the planner's output passes through unchanged below that, when
+     closing fast (time to collision under the limit), when the lead brakes
+     harder than -1.0 m/s², right after a cut-in, below 11 mph, or for
+     anything that isn't the lead. It only ever asks for less braking;
+     FCW and stopping are untouched.
+   - **Soft plan:** while glide may act, the planner's weight on holding
+     the exact distance is lowered (a runtime weight, no solver rebuild),
+     so the plan itself glides. The too-close penalty is unchanged.
+   - **Settings** live in `/data/camry_long.json` (not a Params key, as with
+     the fan page), read once per drive; only switching Glide or Soft Plan
+     off applies mid-drive. Every value is validated and clamped; the gap
+     table can't go below 0.8 s or above 1.75 s. Status for the page in
+     `/dev/shm/camry_long_state.json`.
+   - **Learning:** with "Learn After Drives" on, `camry_learnd` (manager,
+     offroad only) runs `driver_profile.py` + `suggest_long.py` through
+     `test_job.py` at lowest priority once the car has been off 10 min, the
+     battery is above 12.2 V and the device below 60 °C; it is stopped if
+     the car turns on or the device passes 65 °C. It writes only
+     `/data/camry_long_suggested.json` and `camry_long_learned.json`. The
+     page shows each suggested change with its evidence (gas presses,
+     brake takeovers, your manual gaps, your coasts, the PCM brake-light
+     bit), and interventions per engaged hour. **Apply** moves each value
+     at most one step (0.1 s gap, 0.2 m/s²) and keeps the last 5 versions
+     for **Revert**. Nothing changes without a tap.
+   - Bench: `tools/camry/follow_bench.py` runs glide on/off through the
+     real planner (`--table FILE` benches a settings file before Apply).
+
 ## Updating
 
 This branch is pinned to v2026.002.002. To move to a newer sunnypilot

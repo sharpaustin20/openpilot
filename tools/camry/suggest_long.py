@@ -1,0 +1,177 @@
+# Turns a driver_profile.py result into suggested Personalized settings, with the evidence for each change.
+# Writes only the suggestion file (and a small per-route history); nothing changes on the car until the
+# driver taps Apply on the Personalized page, and that limits every step (camry_personalized.SUGGESTABLE).
+#
+#   PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 tools/camry/suggest_long.py /tmp/driver_profile.json
+# Options: --settings FILE, --out FILE (suggestion), --history FILE (per-route stats), --print-only
+import argparse, json, os, sys, time
+from collections import defaultdict
+
+from openpilot.selfdrive.controls.lib import camry_personalized as cp
+
+MPH = 2.237
+MIN_EVENTS = 3           # matching events before a change is suggested
+MIN_EVENTS_SAFETY = 2    # brake takeovers: suggest sooner, since they mean "too close"
+MIN_STEADY = 30          # steady-gap samples per speed bin before the manual gap counts
+STEP_S = 0.05            # s, one step on the follow table (Apply allows up to 0.1)
+# driver_profile speed bins -> the follow table point they inform (mph)
+BIN_TO_BP = {"20-35": 35, "35-50": 40, "50-65": 60, "65-+": 60}
+
+
+def pct(xs, p):
+  if not xs:
+    return None
+  xs = sorted(xs)
+  return xs[min(len(xs) - 1, int(p / 100 * len(xs)))]
+
+
+def bin_of(mph):
+  for lo, hi in ((0, 20), (20, 35), (35, 50), (50, 65), (65, 999)):
+    if lo <= mph < hi:
+      return f"{lo}-{hi if hi < 999 else '+'}"
+  return None
+
+
+def follow_table(settings):
+  bp, vals = cp.follow_table_ms(cp.PersonalizedSettings(**{**settings.__dict__, "personalized": True}))
+  return [round(b * MPH) for b in bp], list(vals)
+
+
+def suggest_follow(tot, settings):
+  """One change for the follow table, from gas overrides (closer), brake takeovers (farther) and manual steady gaps."""
+  bp_mph, vals = follow_table(settings)
+  new = list(vals)
+  why = []
+  gas = defaultdict(list)
+  brake = defaultdict(list)
+  for e in tot.get("gas_overrides", []):
+    if e.get("same_lead") and e.get("gap_s") is not None and e.get("vrel", 0) is not None and e["vrel"] > -1.0:
+      gas[bin_of(e["mph"])].append(e["gap_s"])
+  for e in tot.get("brake_takeovers", []):
+    if e.get("same_lead") and e.get("gap_s") is not None:
+      brake[bin_of(e["mph"])].append(e["gap_s"])
+  manual = tot.get("steady_gap", {}).get("manual", {})
+  for b, bp in BIN_TO_BP.items():
+    if bp not in bp_mph:
+      continue
+    i = bp_mph.index(bp)
+    g, br, man = gas.get(b, []), brake.get(b, []), manual.get(b, [])
+    if len(br) >= MIN_EVENTS_SAFETY:
+      new[i] = vals[i] + (2 * STEP_S if len(br) >= 2 * MIN_EVENTS_SAFETY else STEP_S)
+      why.append(f"{len(br)} brake takeover(s) at {b} mph, gap {pct(br, 50):.2f} s: farther")
+    elif len(g) >= MIN_EVENTS:
+      new[i] = vals[i] - (2 * STEP_S if len(g) >= 2 * MIN_EVENTS else STEP_S)
+      why.append(f"{len(g)} gas press(es) at {b} mph, gap {pct(g, 50):.2f} s: closer")
+    elif len(man) >= MIN_STEADY:
+      med = pct(man, 50)
+      if abs(med - vals[i]) >= STEP_S:
+        new[i] = vals[i] + (STEP_S if med > vals[i] else -STEP_S)
+        why.append(f"you follow at {med:.2f} s manually at {b} mph ({len(man)} samples)")
+  new = [round(min(max(v, cp.MIN_FOLLOW_S), cp.MAX_FOLLOW_S), 2) for v in new]
+  if new == [round(v, 2) for v in vals]:
+    return None
+  return dict(field="follow_s", bp_mph=bp_mph, to=new, why="; ".join(why), **{"from": [round(v, 2) for v in vals]})
+
+
+def suggest_glide(tot, settings):
+  """Glide band and coast decel from the driver's own coasts and the PCM brake-light check."""
+  out = []
+  coasts = [c for c in tot.get("coasts", []) if c["mph"] >= 20]
+  if len(coasts) >= MIN_EVENTS and settings.band == cp.BAND_RELATIVE:
+    bp_mph, vals = follow_table(settings)
+    # how far under the profile's target gap the driver lifts off, and where he finally brakes
+    under = []
+    for c in coasts:
+      target = float(__import__("numpy").interp(c["mph"], bp_mph, vals))
+      under.append(target - c["gap_s"])
+    margin = round(min(max(pct(under, 50), 0.0), 0.5), 2)
+    if abs(margin - settings.coast_margin_s) >= 0.05:
+      out.append(dict(field="coast_margin_s", to=margin, why=f"{len(coasts)} coasts, lift-off {pct(under, 50):.2f} s under target",
+                      **{"from": settings.coast_margin_s}))
+    brakes = [c for c in coasts if c["end"] == "brake"]
+    if len(brakes) >= MIN_EVENTS:
+      width = round(min(max(pct([c["gap_s"] - c["end_gap_s"] for c in brakes], 50), 0.1), 0.5), 2)
+      if abs(width - settings.light_width_s) >= 0.05:
+        out.append(dict(field="light_width_s", to=width, why=f"{len(brakes)} coasts ended in braking after {width:.2f} s of gap",
+                        **{"from": settings.light_width_s}))
+    dec = pct([c["decel"] for c in coasts], 50)
+    if dec is not None:
+      coast_a = round(min(max(dec, -0.6), 0.0), 1)
+      if abs(coast_a - settings.coast_accel) >= 0.1:
+        out.append(dict(field="coast_accel", to=coast_a, why=f"your coasts slow at {dec:.2f} m/s^2", **{"from": settings.coast_accel}))
+  thr = None
+  pb = tot.get("pcm_brake", {})
+  if pb:
+    from openpilot.tools.camry.driver_profile import pcm_brake_threshold
+    thr = pcm_brake_threshold(pb)
+  if thr is not None and settings.coast_accel <= thr:
+    # coasting must stay above the level where the PCM starts braking
+    coast_a = round(min(thr + 0.1, 0.0), 1)
+    out = [o for o in out if o["field"] != "coast_accel"]
+    out.append(dict(field="coast_accel", to=coast_a, why=f"the car brakes for requests at or below {thr:.1f} m/s^2 (0x3B7)",
+                    **{"from": settings.coast_accel}))
+  tk = [e["ttc"] for e in tot.get("brake_takeovers", []) if e.get("same_lead") and e.get("ttc")]
+  if len(tk) >= MIN_EVENTS_SAFETY:
+    ttc = round(min(max(pct(tk, 75) + 1.0, settings.min_ttc_s), 10.0))
+    if ttc > settings.min_ttc_s:
+      out.append(dict(field="min_ttc_s", to=ttc, why=f"{len(tk)} brake takeover(s) at TTC {pct(tk, 50):.1f} s",
+                      **{"from": settings.min_ttc_s}))
+  return out
+
+
+def update_history(tot, path):
+  hist = cp.read_json(path) or {}
+  routes = hist.get("routes", {})
+  for r, st in tot.get("per_route", {}).items():
+    routes[r] = dict(st, t=time.time())
+  hist["routes"] = routes
+  tmp = f"{path}.tmp"
+  with open(tmp, "w") as f:
+    json.dump(hist, f, indent=1)
+  os.replace(tmp, path)
+  return routes
+
+
+def rates(routes):
+  """Interventions (same-lead gas + brake) per engaged hour: newest route, and the newest 5 together."""
+  order = sorted(routes)   # route names are date-time strings, so this is chronological
+  def rate(names):
+    eng = sum(routes[n]["engaged_s"] for n in names)
+    return None if eng < 120 else 3600.0 * sum(routes[n]["gas"] + routes[n]["brake"] for n in names) / eng
+  return dict(per_hour_last=rate(order[-1:]) if order else None, per_hour_5=rate(order[-5:]) if order else None,
+              routes_seen=len(order))
+
+
+def main():
+  ap = argparse.ArgumentParser()
+  ap.add_argument("profile", help="driver_profile.py JSON output")
+  ap.add_argument("--settings", default=cp.settings_path())
+  ap.add_argument("--out", default=cp.suggested_path())
+  ap.add_argument("--history", default=os.path.join(os.path.dirname(cp.suggested_path()), "camry_long_learned.json"))
+  ap.add_argument("--print-only", action="store_true")
+  a = ap.parse_args()
+  with open(a.profile) as f:
+    tot = json.load(f)
+  settings = cp.read_settings(a.settings)
+  changes = []
+  fo = suggest_follow(tot, settings)
+  if fo:
+    changes.append(fo)
+  changes += suggest_glide(tot, settings)
+  routes = update_history(tot, a.history) if not a.print_only else {**(cp.read_json(a.history) or {}).get("routes", {}), **tot.get("per_route", {})}
+  sug = dict(made=time.time(), routes=tot.get("routes", []), changes=changes, stats=rates(routes))
+  print(f"{len(tot.get('routes', []))} route(s); interventions/h: last {sug['stats']['per_hour_last']}, last 5 {sug['stats']['per_hour_5']}")
+  for c in changes:
+    print(f"  {c['field']}: {c['from']} -> {c['to']}  ({c['why']})")
+  if not changes:
+    print("  no change suggested")
+  if not a.print_only:
+    tmp = f"{a.out}.tmp"
+    with open(tmp, "w") as f:
+      json.dump(sug, f, indent=1)
+    os.replace(tmp, a.out)
+    print(f"written: {a.out}")
+
+
+if __name__ == "__main__":
+  sys.exit(main())
