@@ -28,9 +28,8 @@ AGG = log.LongitudinalPersonality.aggressive
 # candidate Aggressive tunes: (speed breakpoints in mph, t_follow values)
 TUNES = {
   "stock 1.25":     ([0], [1.25]),
-  "floor 1.0":      ([40, 60], [1.0, 1.45]),
-  "floor 0.8":      ([40, 60], [0.8, 1.45]),
-  "match exactly":  ([27, 42, 57], [0.56, 0.75, 1.46]),
+  "PR7 1.0":        ([40, 60], [1.0, 1.45]),
+  "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
 }
 
 
