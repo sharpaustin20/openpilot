@@ -212,7 +212,7 @@ class PersonalizedLayout(Widget):
       return tr("no change suggested")
     parts = [tr("applied automatically after your last drive (Undo below):")] if self._sug.get("applied") else []
     if gate.get("verdict") != "pass":
-      parts.append(tr("not benched yet"))
+      parts.append(tr("not benched yet, so Apply is off:"))
     for c in ch[:3]:
       name = FIELD_NAMES.get(c.get("field"), c.get("field"))
       if c.get("field") == "follow_s":
@@ -231,6 +231,9 @@ class PersonalizedLayout(Widget):
   def _apply(self):
     self._refresh_sug()
     if not self._sug or not self._sug.get("changes") or self._sug.get("applied"):
+      return
+    if (self._sug.get("gate") or {}).get("verdict") != "pass":   # same rule as Apply Automatically: benched first
+      self._status = tr("not applied: the bench has not passed these settings yet")
       return
     try:
       new = cp.apply_suggested(self._sug, self.store.s)

@@ -108,12 +108,14 @@ Personal sunnypilot branch for one car:
      gap, 0.2 m/s²) and keeps the last 5 versions for **Revert**. Nothing
      changes without a tap unless **Apply Automatically** (off by default)
      is on; then the learner applies the same limited step itself after
-     each parked run and the page says so. Before a suggestion is offered
-     (or applied), `suggest_long.py` runs `follow_bench.py --gate` on the
-     candidate settings against the current ones (quick set, same test
-     job): more FCW or crashes, braking below -2.5 m/s² or a gap under
-     0.6 s where the current settings had none, or a missed steady gap,
-     drops the suggestion and the page says why. The PCM brake-light check (0x3B7
+     each parked run and the page says so. Before a suggestion is offered,
+     `suggest_long.py` runs `follow_bench.py --gate` on the candidate
+     settings against the current ones (the full scenario set, in the same
+     test job; in Standard and Relaxed too when a glide or soft plan value
+     changes): more FCW or crashes, braking below -2.5 m/s² or a gap under
+     0.6 s where the current settings had none, or a missed steady gap, in
+     any mode, drops the suggestion and the page says why. Apply, manual or
+     automatic, only accepts a suggestion the bench passed. The PCM brake-light check (0x3B7
      `BRAKE_LIGHTS_ACC`) is wired but inactive: `tools/camry/probe_3b7.py`
      found no bit of 0x3B7 that tracks braking on this car (2026-10-24).
    - Bench: `tools/camry/follow_bench.py` runs glide on/off through the

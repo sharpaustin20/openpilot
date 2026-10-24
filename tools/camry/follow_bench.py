@@ -8,7 +8,8 @@
 #   cd /data/openpilot && OPENPILOT_PREFIX=lbench PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 /tmp/follow_bench.py
 # Options: --table FILE   also bench the Personalized settings file FILE (e.g. before tapping Apply)
 #          --quick        only the glide-relevant scenarios
-#          --gate CURRENT CANDIDATE   quick bench of two settings files, PASS/FAIL for the candidate (used by suggest_long.py)
+#          --gate CURRENT CANDIDATE [--modes all]   full bench of two settings files, PASS/FAIL for the candidate
+#                                                   (used by suggest_long.py; --modes all adds Standard and Relaxed)
 import os, sys
 os.environ.setdefault("OPENPILOT_PREFIX", "lbench")   # isolate params/msgq namespace from the real system
 
@@ -315,36 +316,49 @@ def run_jobs(jobs, names):
   return {n: {t: r[t] for t in order if t in r} for n, r in res.items()}
 
 
-def gate(cur_path, cand_path):
-  """--gate CURRENT CANDIDATE (two settings files): quick bench of both in the Personalized slot. PASS unless the
-  candidate has more FCW frames or crashes in a scenario, brakes harder than -2.5 where the current didn't, gets
-  under HARD_MIN_GAP_S where the current didn't, or misses its steady gap. Prints a verdict line and a GATE_JSON
-  line (read by suggest_long.py before a suggestion is offered or applied)."""
+GATE_MODES = {"personalized": AGG, "standard": log.LongitudinalPersonality.standard, "relaxed": log.LongitudinalPersonality.relaxed}
+
+
+def gate(cur_path, cand_path, modes=("personalized",)):
+  """--gate CURRENT CANDIDATE [--modes all] (two settings files): the full scenario set for both, in the Personalized
+  slot and, with --modes all, in Standard and Relaxed too (glide and soft plan act there as well). PASS unless in some
+  scenario of some mode the candidate has more FCW frames or a crash the current doesn't, brakes harder than -2.5
+  where the current didn't, gets under HARD_MIN_GAP_S where the current didn't, or misses its steady gap. Prints a
+  verdict line and a GATE_JSON line (read by suggest_long.py before a suggestion is offered or applied)."""
   import json
-  add_table_tune(cur_path, "current")
-  add_table_tune(cand_path, "candidate")
-  names = ["current", "candidate"]
-  res = run_jobs(job_list(names, True), names)
-  worse = []
-  for k, m in res["candidate"].items():
-    b = res["current"].get(k)
-    if b is None:
-      continue
-    if m["fcw"] > b["fcw"]:
-      worse.append(f"{k}: FCW {m['fcw']} > {b['fcw']}")
-    if m["crash"] and not b["crash"]:
-      worse.append(f"{k}: crash")
-    if m["min_a"] < -2.5 <= b["min_a"]:
-      worse.append(f"{k}: decel {m['min_a']:.2f}")
-    if "min_gap_s" in m and m["min_gap_s"] < cp.HARD_MIN_GAP_S <= b.get("min_gap_s", 9.0):
-      worse.append(f"{k}: min gap {m['min_gap_s']:.2f} s")
-    if k.startswith("steady") and abs(m["gap_m"] - m["expect_m"]) > 0.15 * m["expect_m"] + 1:
-      worse.append(f"{k}: steady gap {m['gap_m']:.0f} m, table {m['expect_m']:.0f} m")
-  tot = {n: dict(fcw=sum(m["fcw"] for m in res[n].values()), crashes=sum(m["crash"] for m in res[n].values()),
-                 brake_s=round(sum(m.get("brake_s", 0.0) for m in res[n].values()), 1),
-                 min_gap_s=round(min(m["min_gap_s"] for m in res[n].values() if "min_gap_s" in m), 2)) for n in names}
-  print(f"GATE {'PASS' if not worse else 'FAIL'}: current {tot['current']} candidate {tot['candidate']}" + (f"  {worse}" if worse else ""))
-  print("GATE_JSON " + json.dumps(dict(verdict="pass" if not worse else "fail", worse=worse, **tot)))
+  names = []
+  for mode in modes:
+    for which, path in (("current", cur_path), ("candidate", cand_path)):
+      name = f"{which}/{mode}"
+      add_table_tune(path, name)
+      PERSONALITIES[name] = GATE_MODES[mode]
+      names.append(name)
+  res = run_jobs(job_list(names, False), names)
+  worse, tot = [], {}
+  for mode in modes:
+    cur, cand = res[f"current/{mode}"], res[f"candidate/{mode}"]
+    for k, m in cand.items():
+      b = cur.get(k)
+      if b is None:
+        continue
+      if m["fcw"] > b["fcw"]:
+        worse.append(f"{mode}, {k}: FCW {m['fcw']} > {b['fcw']}")
+      if m["crash"] and not b["crash"]:
+        worse.append(f"{mode}, {k}: crash")
+      if m["min_a"] < -2.5 <= b["min_a"]:
+        worse.append(f"{mode}, {k}: decel {m['min_a']:.2f}")
+      if "min_gap_s" in m and m["min_gap_s"] < cp.HARD_MIN_GAP_S <= b.get("min_gap_s", 9.0):
+        worse.append(f"{mode}, {k}: min gap {m['min_gap_s']:.2f} s")
+      if k.startswith("steady") and abs(m["gap_m"] - m["expect_m"]) > 0.15 * m["expect_m"] + 1:
+        worse.append(f"{mode}, {k}: steady gap {m['gap_m']:.0f} m, table {m['expect_m']:.0f} m")
+    for which, r in (("current", cur), ("candidate", cand)):
+      tot[f"{which}/{mode}"] = dict(fcw=sum(m["fcw"] for m in r.values()), crashes=sum(m["crash"] for m in r.values()),
+                                    brake_s=round(sum(m.get("brake_s", 0.0) for m in r.values()), 1),
+                                    min_gap_s=round(min(m["min_gap_s"] for m in r.values() if "min_gap_s" in m), 2))
+  verdict = "pass" if not worse else "fail"
+  print(f"GATE {verdict.upper()}: " + " | ".join(f"{n}: FCW {t['fcw']}, crashes {t['crashes']}, min gap {t['min_gap_s']} s, braking {t['brake_s']} s"
+                                                 for n, t in tot.items()) + (f"  {worse}" if worse else ""))
+  print("GATE_JSON " + json.dumps(dict(verdict=verdict, worse=worse, modes=list(modes), totals=tot)))
 
 
 def main():
@@ -453,7 +467,9 @@ def diag():
 
 if __name__ == "__main__":
   if "--gate" in sys.argv:
-    gate(sys.argv[sys.argv.index("--gate") + 1], sys.argv[sys.argv.index("--gate") + 2])
+    i = sys.argv.index("--gate")
+    all_modes = "--modes" in sys.argv and sys.argv[sys.argv.index("--modes") + 1] == "all"
+    gate(sys.argv[i + 1], sys.argv[i + 2], tuple(GATE_MODES) if all_modes else ("personalized",))
   elif "--diag" in sys.argv:
     diag()
   else:

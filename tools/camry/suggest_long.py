@@ -26,7 +26,7 @@ STOCK_T_FOLLOW = {1: 1.45, 2: 1.75}   # personality raw -> stock gap (standard, 
 SOFT_STEP = 0.1
 SOFT_FLOOR = 0.2
 SOFT_RELAX_ENGAGED_S = 3600
-GATE_TIMEOUT_S = 900     # the quick bench of current vs candidate settings takes about a minute on the comma
+GATE_TIMEOUT_S = 1200    # the full bench of current vs candidate settings takes 1-4 min on the comma's 8 cores
 
 
 def pct(xs, p):
@@ -161,9 +161,10 @@ def suggest_soft(tot, settings):
   return [dict(field="soft_distance_factor", to=new, why=why, **{"from": cur})]
 
 
-def bench_gate(settings, candidate):
-  """Quick follow_bench of the candidate settings against the current ones (follow_bench.py --gate), as a child of
-  this process so it ends with the learning job. Returns the GATE_JSON dict, or {"verdict": "skipped", "why": ...}."""
+def bench_gate(settings, candidate, all_modes):
+  """follow_bench.py --gate of the candidate settings against the current ones (full scenario set; all three distance
+  modes when all_modes), as a child of this process so it ends with the learning job. Returns the GATE_JSON dict, or
+  {"verdict": "skipped", "why": ...}."""
   bench = os.path.join(os.path.dirname(os.path.abspath(__file__)), "follow_bench.py")
   root = os.path.dirname(os.path.dirname(os.path.dirname(bench)))
   try:
@@ -171,8 +172,8 @@ def bench_gate(settings, candidate):
       cur, cand = os.path.join(d, "current.json"), os.path.join(d, "candidate.json")
       cp.write_settings(settings, cur)
       cp.write_settings(candidate, cand)
-      r = subprocess.run([sys.executable, bench, "--gate", cur, cand], capture_output=True, text=True, timeout=GATE_TIMEOUT_S,
-                         env={**os.environ, "OPENPILOT_PREFIX": "lbench"}, cwd=root)
+      cmd = [sys.executable, bench, "--gate", cur, cand] + (["--modes", "all"] if all_modes else [])
+      r = subprocess.run(cmd, capture_output=True, text=True, timeout=GATE_TIMEOUT_S, env={**os.environ, "OPENPILOT_PREFIX": "lbench"}, cwd=root)
     for line in r.stdout.splitlines():
       if line.startswith("GATE_JSON "):
         return json.loads(line[len("GATE_JSON "):])
@@ -231,16 +232,18 @@ def main():
   if not changes:
     print("  no change suggested")
   if changes and not a.no_gate:
-    # the candidate (what Apply would produce) must bench no worse than the current settings before it is offered
-    gate = bench_gate(settings, cp.apply_suggested(sug, settings))
+    # the candidate (what Apply would produce) must bench no worse than the current settings before it is offered;
+    # glide and soft plan settings act in every distance mode, so those changes are benched in all three
+    all_modes = any(c["field"] != "follow_s" for c in changes)
+    gate = bench_gate(settings, cp.apply_suggested(sug, settings), all_modes)
     sug["gate"] = gate
     if gate["verdict"] == "fail":
       sug["dropped"], sug["changes"] = changes, []
       changes = []
       print(f"bench gate: FAIL, suggestions dropped: {gate.get('worse')}")
     elif gate["verdict"] == "pass":
-      print(f"bench gate: PASS (candidate crashes {gate['candidate']['crashes']}, FCW {gate['candidate']['fcw']}, "
-            f"min gap {gate['candidate']['min_gap_s']} s; current {gate['current']['crashes']}, {gate['current']['fcw']}, {gate['current']['min_gap_s']} s)")
+      print("bench gate: PASS (" + "; ".join(f"{n}: crashes {t['crashes']}, FCW {t['fcw']}, min gap {t['min_gap_s']} s, braking {t['brake_s']} s"
+                                            for n, t in gate.get("totals", {}).items()) + ")")
     else:
       print(f"bench gate: not run ({gate.get('why')}); suggestions kept but not applied automatically")
   if not a.print_only:
