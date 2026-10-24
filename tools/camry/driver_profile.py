@@ -86,12 +86,12 @@ def extract_route(args):
             last_t = t
         elif w == "carControl":
           cur["long_active"] = m.carControl.longActive
+          cur["lat_active"] = m.carControl.latActive
           cur["req_a"] = m.carControl.actuators.accel
         elif w == "can":
           for c in m.can:
             if c.address == 0x3B7 and c.src == 0 and len(c.dat) >= 3:   # ACC brake lights: 1 bit (Motorola 18 -> byte 2, bit 2)
               cur["pcm_brake"] = bool(c.dat[2] & 0x04)
-          cur["lat_active"] = m.carControl.latActive
         elif w == "selfdriveState":
           sd = m.selfdriveState
           cur.update(sd_state=str(sd.state), enabled=sd.enabled, personality=sd.personality.raw)
