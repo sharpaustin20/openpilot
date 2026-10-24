@@ -39,20 +39,6 @@ Personal sunnypilot branch for one car:
      camera instead of crashing card.
    - Only active for `TOYOTA_CAMRY` with the SMART_DSU flag.
 
-3. **Use All CPU Cores (Car Off)** (Settings > Fan; `system/hardware/offroad_cores.py`,
-   `system/hardware/hardwared.py`, `system/hardware/tici/hardware.py`)
-   - Stock power save takes cpu4-7 offline while the car is off and the
-     screen is asleep. With this toggle on, all 8 cores stay online
-     (ondemand governor, capped at 1689 MHz like onroad) so offline jobs
-     such as log replays run faster.
-   - Off by default. Stored in `/data/offroad_all_cores` ("1" = on).
-   - Falls back to stock power save when the device is overheated, or in
-     the car when the low-passed battery voltage is below 12.0 V.
-   - The 11.8 V low-voltage shutdown, battery-estimate shutdown, max
-     offroad time and thermal logic are unchanged. The battery estimate
-     uses measured power draw, so extra draw is counted.
-   - Onroad behavior is unchanged.
-
 ## Updating
 
 This branch is pinned to v2026.002.002. To move to a newer sunnypilot
