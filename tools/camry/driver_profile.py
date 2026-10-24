@@ -59,6 +59,8 @@ def extract_route(args):
         w = m.which()
         if w in ("carControl", "selfdriveState", "longitudinalPlan", "radarState"):
           seen.add(w)
+        elif w == "initData" and "git" not in note:
+          note = (note + " " if note else "") + f"git {m.initData.gitCommit[:7]}"
         if w == "carState":
           cs = m.carState
           cur.update(v=cs.vEgo, a=cs.aEgo, gas=cs.gasPressed, brake=cs.brakePressed,
@@ -86,7 +88,7 @@ def extract_route(args):
                      yrel=l.yRel, prob=l.modelProb, radar=l.radar)
     except Exception as e:
       errors += 1
-      note = f"{errors} segment read errors, last in seg {s}: {e}"
+      note = f"{note} {errors} segment read errors, last in seg {s}: {e}".strip()
   return route, ticks, note
 
 
@@ -149,13 +151,16 @@ def analyze(route, ticks):
   for i, k in enumerate(ticks):
     md = mode(k)
     out["mode_seconds"][md] += TICK
+    if md in ("engaged", "gas_override"):
+      out["mode_seconds"][f"engaged_{PERSONALITY.get(k['personality'], 'unknown')}"] += TICK
     prev = ticks[i - 1] if i else k
 
     # steady following: same lead, matched speed, not accelerating hard
     if good_lead(k) and abs(k["vrel"]) < 1.0 and abs(k["a"]) < 0.4 and not k["blinker"] and md in ("manual", "engaged"):
       b = bin_of(k["v"])
       if b and i % 4 == 0 and same_lead_window(ticks, i - 20, i):   # 5 Hz samples, lead stable for 1 s
-        out["steady_gap"][md][b].append(round(t_equiv(k), 3))
+        key = md if md == "manual" else f"engaged_{PERSONALITY.get(k['personality'], 'unknown')}"
+        out["steady_gap"][key][b].append(round(t_equiv(k), 3))
 
     if md == "manual" and good_lead(k):
       if k["vrel"] > 1.0 and k["gas"] and i % 4 == 0:
@@ -224,14 +229,14 @@ def summary(tot):
   L = [f"routes {len(tot['routes'])}, {tot['seconds'] / 60:.0f} min; time by mode (min): "
        + ", ".join(f"{m} {s / 60:.0f}" for m, s in sorted(tot["mode_seconds"].items()))]
   L.append("steady following gap as sunnypilot t_follow (s): median [p25-p75] (samples)")
-  for md in ("manual", "engaged"):
+  for md in ["manual"] + sorted(m for m in tot["steady_gap"] if m.startswith("engaged")):
     bins = tot["steady_gap"].get(md, {})
     row = []
     for lo, hi in SPEED_BINS:
       b = f"{lo}-{hi if hi < 200 else '+'}"
       xs = bins.get(b, [])
       row.append(f"{b}mph {pct(xs, 50)} [{pct(xs, 25)}-{pct(xs, 75)}] ({len(xs)})" if len(xs) >= 10 else f"{b}mph -")
-    L.append(f"  {md:8s} " + " | ".join(row))
+    L.append(f"  {md:19s} " + " | ".join(row))
   acc = tot["manual_accel_lead_away"]
   if acc:
     L.append(f"manual accel when lead pulls away (m/s^2): median {pct(acc, 50)}, p90 {pct(acc, 90)} ({len(acc)})")
@@ -247,6 +252,10 @@ def summary(tot):
     L.append(f"{label}: {len(ev)} total, {len(ok)} with the same in-lane lead (candidates to confirm)")
     for e in ok[:8]:
       L.append("  " + ", ".join(f"{k}={v}" for k, v in e.items() if k not in ("same_lead",)))
+  eng_h = (tot["mode_seconds"].get("engaged", 0) + tot["mode_seconds"].get("gas_override", 0)) / 3600
+  if eng_h > 0:
+    g = sum(e["same_lead"] for e in tot["gas_overrides"]); b = sum(e["same_lead"] for e in tot["brake_takeovers"])
+    L.append(f"override rate (same-lead only): gas {g / eng_h:.1f}/h, brake {b / eng_h:.1f}/h over {eng_h * 60:.0f} engaged min")
   pc = tot["personality_changes"]
   if pc:
     L.append("distance button changes: " + "; ".join(f"{p['mph']}mph->{p['to']}" for p in pc[:10]))
