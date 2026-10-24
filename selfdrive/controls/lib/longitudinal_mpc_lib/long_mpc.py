@@ -9,6 +9,7 @@ from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
+from openpilot.selfdrive.controls.lib import camry_personalized
 
 if __name__ == '__main__':  # generating code
   from acados.acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
@@ -70,17 +71,22 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
     raise NotImplementedError("Longitudinal personality not supported")
 
 
-# Camry: aggressive follows the driver's own profile (measured from manual drives), closer in town
-AGGRESSIVE_T_FOLLOW_BP = [17.9, 26.8]  # m/s, 40 mph and 60 mph
-AGGRESSIVE_T_FOLLOW_V = [1.0, 1.45]
+# Camry Personalized profile (takes the Aggressive slot when switched on, see camry_personalized.py):
+# default table fitted to the driver's own manual following, closer in town (0.8 s to 35 mph, 1.0 s at 40,
+# 1.45 s at 60+). The Personalized page can override it with a learned table.
+PERSONALIZED_T_FOLLOW_BP = [b * camry_personalized.MPH for b in camry_personalized.DEFAULT_FOLLOW_BP_MPH]  # m/s
+PERSONALIZED_T_FOLLOW_V = list(camry_personalized.DEFAULT_FOLLOW_S)
 
-def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, v_ego=0.0):
+def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, v_ego=0.0, personalized=None):
+  """personalized: None = stock Aggressive, else the Personalized (breakpoints m/s, t_follow s) table."""
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.75
   elif personality==log.LongitudinalPersonality.standard:
     return 1.45
   elif personality==log.LongitudinalPersonality.aggressive:
-    return float(np.interp(v_ego, AGGRESSIVE_T_FOLLOW_BP, AGGRESSIVE_T_FOLLOW_V))
+    if personalized is None:
+      return 1.25
+    return float(np.interp(v_ego, personalized[0], personalized[1]))
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
@@ -223,6 +229,7 @@ class LongitudinalMpc:
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.reset()
     self.source = LongitudinalPlanSource.cruise
+    self.personalized = None  # Personalized follow table in the Aggressive slot, set by the planner once per drive
 
   def reset(self):
     self.solver.reset()
@@ -271,10 +278,11 @@ class LongitudinalMpc:
     for i in range(N):
       self.solver.cost_set(i, 'Zl', Zl)
 
-  def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
+  def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard, obstacle_cost_factor=1.0):
+    # obstacle_cost_factor < 1: care less about holding the exact distance (Camry Personalized soft plan)
     jerk_factor = get_jerk_factor(personality)
     a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
-    cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
+    cost_weights = [obstacle_cost_factor * X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
     constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
     self.set_cost_weights(cost_weights, constraint_cost_weights)
 
@@ -319,7 +327,7 @@ class LongitudinalMpc:
 
   def update(self, radarstate, v_cruise, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
-    t_follow = get_T_FOLLOW(personality, v_ego)
+    t_follow = get_T_FOLLOW(personality, v_ego, self.personalized)
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
     lead_xv_0 = self.process_lead(radarstate.leadOne)

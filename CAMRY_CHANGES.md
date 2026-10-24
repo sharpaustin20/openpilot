@@ -59,13 +59,76 @@ Personal sunnypilot branch for one car:
    - Fan page shows whether a test job is running and which cores are online.
 
 4. **Aggressive follows by speed** (`selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py`)
-   - Stock Aggressive is a flat 1.25 s gap. On this branch it is 1.0 s up
-     to 40 mph, blending to 1.45 s at 60 mph and above, fitted to the
-     driver's own manual following (`tools/camry/driver_profile.py`).
-   - The 1.0 s floor is deliberate until drives with the radar reader
-     show closing-speed braking is early enough to go closer.
+   - Stock Aggressive is a flat 1.25 s gap. On this branch it is 0.8 s up
+     to 35 mph, 1.0 s at 40 mph, blending to 1.45 s at 60 mph and above,
+     fitted to the driver's own following (`tools/camry/driver_profile.py`).
+   - 0.8 s in town is the driver's choice (was 1.0 s in PR #7). The bench
+     shows it holds up in normal braking but has less margin than 1.0 s
+     when a lead brakes very hard; see PR #8.
    - Standard and Relaxed are unchanged. Checked with
      `tools/camry/follow_bench.py` (real planner vs. simulated leads).
+
+5. **Personalized profile: glide, soft plan, learning** (`selfdrive/controls/lib/camry_personalized.py`,
+   `selfdrive/controls/lib/longitudinal_planner.py`, `long_mpc.py`, Settings > Personalized,
+   `tools/camry/learnd.py`, `tools/camry/suggest_long.py`, `tools/camry/driver_profile.py`)
+   - A **Personalized** profile replaces Aggressive in the distance button
+     (Personalized, Standard, Relaxed): on by default, so the speed-based
+     gap table from item 4 is what the Aggressive position drives right
+     after the update. Its toggle is the way back to stock Aggressive
+     (flat 1.25 s). Standard and Relaxed keep their stock gaps.
+   - **Glide** (own toggle, on by default, in every distance mode): behind
+     a lead in the same lane, small braking requests are raised to the
+     car's coast decel while the gap is a little under the current mode's
+     target (coast zone), braking is capped in a light zone below it, and
+     the planner's output passes through unchanged below that, when
+     closing fast (time to collision under the limit), when the lead brakes
+     harder than -1.0 m/s², right after a cut-in, below 11 mph, or for
+     anything that isn't the lead. It only ever asks for less braking;
+     FCW and stopping are untouched.
+   - **Soft plan** (on by default): while glide may act, the planner's
+     weight on holding the exact distance is lowered (a runtime weight, no
+     solver rebuild), so the plan itself glides. The too-close penalty is
+     unchanged. The learner tunes the strength: one step firmer after
+     brake takeovers inside the glide band, one step softer after an hour
+     engaged without one (never below 0.2).
+   - **Settings** live in `/data/camry_long.json` (not a Params key, as with
+     the fan page), read once per drive; only switching Glide or Soft Plan
+     off applies mid-drive. Every value is validated and clamped; the gap
+     table can't go below 0.8 s or above 1.75 s, and the glide ranges stay
+     inside what the bench has covered: coast decel -0.6 to -0.1 m/s², TTC
+     gate 5-10 s, coast margin 0.05-0.5 s, light braking -1.5 to -0.5 m/s²
+     (the page offers the same choices). Status for the page in
+     `/dev/shm/camry_long_state.json`.
+   - **Learning** ("Learn After Drives", on by default): `camry_learnd`
+     (manager, offroad only) runs `driver_profile.py` + `suggest_long.py`
+     through `test_job.py` at lowest priority once the car has been off
+     10 min, the battery is above 12.2 V and the device below 60 °C; it is
+     stopped if the car turns on or the device passes 65 °C; a run takes the
+     20 newest unlearned drives, so a backlog is worked off in batches. It writes only
+     `/data/camry_long_suggested.json` and `camry_long_learned.json`. The
+     page shows each suggested change with its evidence (gas presses,
+     brake takeovers, your manual gaps, your coasts), and interventions
+     per engaged hour. **Apply** moves each value at most one step (0.1 s
+     gap, 0.2 m/s²) and keeps the last 5 versions for **Revert**. Nothing
+     changes without a tap unless **Apply Automatically** (off by default)
+     is on; then the learner applies the same limited step itself after
+     each parked run and the page says so. Before a suggestion is offered,
+     `suggest_long.py` runs `follow_bench.py --gate` on the candidate
+     settings against the current ones (the full scenario set, in the same
+     test job; in Standard and Relaxed too when a glide or soft plan value
+     changes). The rule is strict: more collision-warning frames in any
+     scenario, a crash, braking below -2.5 m/s² or a gap under 0.6 s where
+     the current settings had none, or a missed steady gap, in any mode,
+     fails the candidate. If the whole set fails, the glide/soft plan
+     changes and the gap-table change are benched separately and the
+     group that passes is offered; the rest is shown as dropped with the
+     bench's reason. Apply, manual or automatic, only accepts a
+     suggestion the bench passed. The PCM brake-light check (0x3B7
+     `BRAKE_LIGHTS_ACC`) is wired but inactive: `tools/camry/probe_3b7.py`
+     found no bit of 0x3B7 that tracks braking on this car (2026-10-24).
+   - Bench: `tools/camry/follow_bench.py` runs glide on/off through the
+     real planner in all three distance modes (`--table FILE` benches a
+     settings file before Apply).
 
 ## Updating
 

@@ -11,6 +11,8 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib import long_mpc
+from openpilot.selfdrive.controls.lib.camry_personalized import GlideGovernor, SafeGlide, follow_table_ms
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
@@ -61,6 +63,17 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
+    # Camry: Personalized gap table in the Aggressive slot, glide in every distance mode. Settings are read once
+    # per drive (plannerd start). SafeGlide: any error in the glide code logs once and leaves the plain MPC output
+    # for the rest of the drive.
+    self.mpc.personalized = None
+    try:
+      self.glide = SafeGlide(GlideGovernor(dt=dt))
+      self.mpc.personalized = follow_table_ms(self.glide.settings)
+    except Exception:
+      cloudlog.exception("camry personalized: settings failed, stock Aggressive and no glide for this drive")
+      self.glide = SafeGlide(GlideGovernor(live=False))
+      self.glide.failed = True
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -136,7 +149,20 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if force_slow_decel:
       v_cruise = 0.0
 
-    self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
+    personality = sm['selfdriveState'].personality
+    self.glide.refresh_settings()
+    if reset_state or force_slow_decel:
+      self.glide.reset()
+    else:
+      try:
+        t_follow = long_mpc.get_T_FOLLOW(personality, v_ego, self.mpc.personalized)   # the current mode's target gap
+      except Exception:
+        t_follow = 0.0
+        self.glide._fail("get_T_FOLLOW")
+      self.glide.observe(v_ego, sm['radarState'].leadOne, t_follow)
+    obstacle_cost_factor = self.glide.distance_cost_factor(self.mpc.source == LongitudinalPlanSource.lead0)
+
+    self.mpc.set_weights(prev_accel_constraint, personality=personality, obstacle_cost_factor=obstacle_cost_factor)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
     self.mpc.update(sm['radarState'], v_cruise, personality=sm['selfdriveState'].personality)
 
@@ -168,6 +194,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     else:
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
+
+    # Camry Personalized glide: coast instead of braking to hold the exact gap (only ever less braking)
+    if not self.output_should_stop:
+      output_a_target = self.glide.apply(output_a_target, self.mpc.source == LongitudinalPlanSource.lead0, ACCEL_MIN)
+    self.glide.write_state()
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
