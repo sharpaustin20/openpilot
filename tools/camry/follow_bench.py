@@ -1,0 +1,312 @@
+# Closed-loop following test bench: runs sunnypilot's real LongitudinalPlanner (MPC) against simulated leads
+# and compares follow-gap tunes for the Aggressive personality. Nothing is published or written:
+# no msgq sockets are opened, real-time pacing is disabled, and the gap table is swapped in-process only.
+#
+# Run with the car OFF (refuses if onroad), works on the stock branch (no install needed):
+#   cd /data/openpilot && OPENPILOT_PREFIX=lbench PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 /tmp/follow_bench.py
+import os, sys
+os.environ.setdefault("OPENPILOT_PREFIX", "lbench")   # isolate params/msgq namespace from the real system
+
+try:
+  with open("/data/params/d/IsOnroad", "rb") as f:
+    if f.read().strip() == b"1":
+      sys.exit("car is onroad; run this with the car off")
+except OSError:
+  pass
+
+import numpy as np
+import cereal.messaging as messaging
+from cereal import log
+import openpilot.selfdrive.test.longitudinal_maneuvers.plant as plant_mod
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib import long_mpc
+from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+
+MPH = 0.44704
+DT = 0.05
+AGG = log.LongitudinalPersonality.aggressive
+
+# candidate Aggressive tunes: (speed breakpoints in mph, t_follow values)
+TUNES = {
+  "stock 1.25":     ([0], [1.25]),
+  "floor 1.0":      ([40, 60], [1.0, 1.45]),
+  "floor 0.8":      ([40, 60], [0.8, 1.45]),
+  "match exactly":  ([27, 42, 57], [0.56, 0.75, 1.46]),
+}
+
+
+class FakeRk:
+  def __init__(self, *a, **k):
+    self.frame = 0
+  def monitor_time(self):
+    self.frame += 1
+    return False
+
+
+class NoSock:
+  def __init__(self, *a, **k):
+    pass
+
+
+plant_mod.Ratekeeper = FakeRk
+plant_mod.Plant.messaging_initialized = True   # skip pub/sub socket creation
+plant_mod.time.sleep = lambda s: None
+messaging.SubMaster = NoSock
+
+
+# The stock branch calls get_T_FOLLOW(personality) without speed, so record the MPC's current v_ego here
+CUR_V = [0.0]
+_mpc_update = long_mpc.LongitudinalMpc.update
+def _update(self, *a, **k):
+  CUR_V[0] = float(self.x0[1])
+  return _mpc_update(self, *a, **k)
+long_mpc.LongitudinalMpc.update = _update
+
+
+def set_tune(bp_mph, vals):
+  bp = [b * MPH for b in bp_mph]
+  stock = long_mpc.get_T_FOLLOW
+  def t_follow(personality=log.LongitudinalPersonality.standard, v_ego=None):
+    if personality == AGG:
+      return float(np.interp(CUR_V[0] if v_ego is None else v_ego, bp, vals))
+    return stock(personality)
+  long_mpc.get_T_FOLLOW = t_follow
+  return stock
+
+
+CAR_MODE = os.environ.get("BENCH_CAR", "toyota")   # "honda" = the Plant's own CarParams, as in openpilot CI
+
+
+CP_VARIANT = ""   # diag A/B: "honda_swap", or "+radar", "+delay", "+flags", "+all" on top of the Camry CP
+
+
+FIELD_GROUPS = {
+  "id": ["brand", "carFingerprint"],
+  "geom": ["wheelbase", "steerRatio", "centerToFront", "mass", "rotationalInertia", "tireStiffnessFront", "tireStiffnessRear"],
+  "rest": ["longitudinalTuning", "transmissionType", "maxLateralAccel", "lateralTuning", "lateralParams", "steerActuatorDelay",
+           "steerLimitTimer", "steerControlType", "minSteerSpeed", "safetyConfigs", "tireStiffnessFactor", "wheelSpeedFactor"],
+}
+
+
+def mixed_cp(base, group):
+  """base CP with the fields of one group copied from the other car ('allbut_id' = everything except identity)."""
+  from opendbc.car.toyota.values import CAR as TC
+  from opendbc.car.toyota.interface import CarInterface as TI
+  from opendbc.car.honda.values import CAR as HC
+  from opendbc.car.honda.interface import CarInterface as HI
+  t, h = TI.get_non_essential_params(TC.TOYOTA_CAMRY), HI.get_non_essential_params(HC.HONDA_CIVIC)
+  t.openpilotLongitudinalControl = True
+  CP, other = (h, t) if base == "honda" else (t, h)
+  if group == "allbut_id":
+    fields = [f for f in other.to_dict() if f not in FIELD_GROUPS["id"]]
+  else:
+    fields = FIELD_GROUPS[group]
+  od = other.to_dict()
+  for f in fields:
+    if f in od:
+      try:
+        setattr(CP, f, getattr(other, f))   # capnp builder: struct/list assignment copies
+      except Exception as e:
+        print(f"mixed_cp: could not copy {f}: {e}")
+  SP = (HI.get_non_essential_params_sp(CP, HC.HONDA_CIVIC) if base == "honda" else TI.get_non_essential_params_sp(CP, TC.TOYOTA_CAMRY))
+  CP.openpilotLongitudinalControl = True   # get_non_essential_params_sp resets it
+  return CP, SP
+
+
+def make_planner(v0):
+  if CP_VARIANT.startswith("mix:"):   # e.g. mix:honda:id = Honda CP with the Camry's brand/fingerprint
+    _, base, group = CP_VARIANT.split(":")
+    CP, SP = mixed_cp(base, group)
+    return LongitudinalPlanner(CP, SP, init_v=v0)
+  if CP_VARIANT == "honda_swap":   # Honda CP, but built through the same swap path as the Camry
+    from opendbc.car.honda.values import CAR
+    from opendbc.car.honda.interface import CarInterface
+    CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+    return LongitudinalPlanner(CP, CarInterface.get_non_essential_params_sp(CP, CAR.HONDA_CIVIC), init_v=v0)
+  from opendbc.car.toyota.values import CAR
+  from opendbc.car.toyota.interface import CarInterface
+  CP = CarInterface.get_non_essential_params(CAR.TOYOTA_CAMRY)
+  # the Camry runs openpilot longitudinal (Alpha Long); without this the planner resets every step
+  # because the bench never sets selfdriveState.enabled
+  CP.openpilotLongitudinalControl = True
+  if CP_VARIANT in ("+radar", "+all"):
+    CP.radarUnavailable = False
+  if CP_VARIANT in ("+delay", "+all"):
+    CP.radarDelay = 0.1
+  if CP_VARIANT in ("+flags", "+all"):
+    CP.flags = 272
+    CP.autoResumeSng = True
+  CP_SP = CarInterface.get_non_essential_params_sp(CP, CAR.TOYOTA_CAMRY)
+  CP.openpilotLongitudinalControl = True   # get_non_essential_params_sp resets this to False, so set it after
+  return LongitudinalPlanner(CP, CP_SP, init_v=v0)
+
+
+def use_camry_planner():
+  # Plant builds its planner inside __init__; swap the class it uses so only ONE planner (one acados solver)
+  # exists per run. A second solver instance in the same process corrupts the first ("solution_status 4" resets).
+  plant_mod.LongitudinalPlanner = lambda CP, CP_SP, init_v=0.0: make_planner(init_v)
+
+
+def make_plant(v0, d0, e2e):
+  if CAR_MODE != "honda":
+    use_camry_planner()
+  return plant_mod.Plant(lead_relevancy=True, speed=v0, distance_lead=d0, e2e=e2e, personality=AGG)
+
+
+def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
+  """lead_profile(t) -> lead speed. Returns metrics after a 30 s settle at constant lead speed."""
+  if d0 is None:
+    d0 = long_mpc.get_T_FOLLOW(AGG, v0) * v0 + long_mpc.STOP_DISTANCE
+  p = make_plant(v0, d0, e2e)
+  p.v_lead_prev = v0
+  settle = 40.0
+  rows, fcw = [], 0
+  while p.current_time < settle + duration:
+    t = p.current_time
+    vl = float(lead_profile(t - settle)) if t >= settle else v0
+    out = p.step(vl, 1.0, cruise_mph * MPH, 0.0, 1.0)
+    if t >= settle:
+      d = out["distance_lead"] - out["distance"]
+      rows.append((d, out["speed"], vl, out["acceleration"]))
+      fcw += bool(out["fcw"])
+  a = np.array(rows)
+  d, v, vl, acc = a.T
+  closing = vl - v
+  ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
+  expect = long_mpc.get_T_FOLLOW(AGG, v[0]) * v[0] + long_mpc.STOP_DISTANCE
+  return dict(gap_m=d[0], expect_m=expect, gap_s=d[0] / max(v[0], 0.1), min_gap_m=d.min(), min_ttc=ttc.min(),
+              min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4))
+
+
+def scenarios():
+  S = []
+  for mph in (30, 45, 60, 70):
+    v = mph * MPH
+    S.append((f"steady {mph} mph", lambda t, v=v: v, v, None, 5.0))
+  for mph in (30, 45, 60):
+    v = mph * MPH
+    for dec in (2.0, 3.5, 5.0):
+      S.append((f"lead brakes {dec} m/s2 from {mph} mph to stop", lambda t, v=v, dec=dec: max(0.0, v - dec * t), v, None, 25.0))
+  v60 = 60 * MPH
+  S.append(("lead slows 60->40 mph at 1.5 m/s2", lambda t: max(40 * MPH, v60 - 1.5 * t), v60, None, 25.0))
+  return S
+
+
+def cut_in(v_ego_mph, d_cut, dv):
+  """Lead suddenly appears d_cut m ahead, dv m/s slower, then holds speed."""
+  v = v_ego_mph * MPH
+  p = make_plant(v, 200.0, False)
+  p.lead_relevancy = False
+  for _ in range(int(20 / DT)):
+    p.step(v, 0.0, v, 0.0, 1.0)   # cruise = ego speed, so the ego holds speed until the cut-in
+  v_cut = p.speed
+  p.lead_relevancy = True
+  p.distance_lead = p.distance + d_cut
+  p.v_lead_prev = v_cut - dv
+  rows, fcw = [], 0
+  for _ in range(int(20 / DT)):
+    out = p.step(v_cut - dv, 1.0, v, 0.0, 1.0)
+    rows.append((out["distance_lead"] - out["distance"], out["speed"], out["acceleration"]))
+    fcw += bool(out["fcw"])
+  a = np.array(rows)
+  return dict(min_gap_m=a[:, 0].min(), min_a=a[:, 2].min(), fcw=fcw, crash=bool(a[:, 0].min() < 0.4))
+
+
+def job(args):
+  name, idx = args
+  bp, vals = TUNES[name]
+  set_tune(bp, vals)   # each worker process gets its own copy of the patched module
+  sc = scenarios()
+  if idx < len(sc):
+    title, prof, v0, d0, dur = sc[idx]
+    return name, title, run(prof, v0, d0, dur)
+  mph, dcut, dv = CUT_INS[idx - len(sc)]
+  return name, f"cut-in {dcut} m ahead, {dv} m/s slower at {mph} mph", cut_in(mph, dcut, dv)
+
+
+CUT_INS = ((40, 15, 3), (60, 25, 4))
+
+
+def main():
+  from multiprocessing import Pool
+  n_jobs = len(scenarios()) + len(CUT_INS)
+  jobs = [(name, i) for name in TUNES for i in range(n_jobs)]
+  res = {name: {} for name in TUNES}
+  order = [t for t, *_ in scenarios()] + [f"cut-in {d} m ahead, {dv} m/s slower at {m} mph" for m, d, dv in CUT_INS]
+  print(f"{len(jobs)} runs on {os.cpu_count()} cores", flush=True)
+  with Pool(os.cpu_count(), maxtasksperchild=1) as pool:   # fresh process per job: no patches leak between jobs
+    for k, (name, title, m) in enumerate(pool.imap_unordered(job, jobs), 1):
+      res[name][title] = m
+      if k % 10 == 0:
+        print(f"  {k}/{len(jobs)}", flush=True)
+  res = {n: {t: r[t] for t in order} for n, r in res.items()}
+
+  names = list(TUNES)
+  print("\nsteady gap at speed (m / s):")
+  for mph in (30, 45, 60, 70):
+    k = f"steady {mph} mph"
+    print(f"  {mph} mph: " + " | ".join(f"{n} {res[n][k]['gap_m']:.0f} m (table {res[n][k]['expect_m']:.0f}) {res[n][k]['gap_s']:.2f} s" for n in names))
+  bad = [(n, k) for n in names for k, m in res[n].items() if k.startswith("steady") and abs(m["gap_m"] - m["expect_m"]) > 0.15 * m["expect_m"] + 1]
+  sane = not res[names[0]]["lead brakes 2.0 m/s2 from 30 mph to stop"]["crash"] and not bad
+  print(f"FIDELITY CHECK: {'OK' if sane else 'FAILED (do not trust results)'}" + (f" steady-gap mismatches: {bad}" if bad else ""))
+  print("\nevents (min gap m, min TTC s, hardest decel m/s2, FCW frames, crash):")
+  for k in res[names[0]]:
+    if k.startswith("steady"):
+      continue
+    print(f"  {k}")
+    for n in names:
+      m = res[n][k]
+      ttc = f"{m['min_ttc']:.1f}" if "min_ttc" in m and np.isfinite(m["min_ttc"]) else "-"
+      print(f"    {n:14s} gap {m['min_gap_m']:5.1f}  ttc {ttc:>5s}  decel {m['min_a']:5.2f}  fcw {m['fcw']:3d}  crash {m['crash']}")
+  worst = {n: dict(min_a=min(m["min_a"] for m in res[n].values()), fcw=sum(m["fcw"] for m in res[n].values()),
+                   crashes=sum(m["crash"] for m in res[n].values())) for n in names}
+  print("\nsummary: " + " | ".join(f"{n}: hardest {w['min_a']:.2f}, FCW frames {w['fcw']}, crashes {w['crashes']}" for n, w in worst.items()))
+
+
+def diag_job(args):
+  mode, idx = args
+  global CAR_MODE, CP_VARIANT
+  if mode == "honda":
+    CAR_MODE, CP_VARIANT = "honda", ""
+  elif mode == "honda_swap":
+    CAR_MODE, CP_VARIANT = "toyota", "honda_swap"   # Honda CP through the Camry swap path
+  elif mode.startswith("mix:"):
+    CAR_MODE, CP_VARIANT = "toyota", mode
+  else:
+    CAR_MODE, CP_VARIANT = "toyota", mode[len("toyota"):]
+  if idx >= 0:
+    from openpilot.selfdrive.test.longitudinal_maneuvers.test_longitudinal import create_maneuvers
+    man = create_maneuvers({"e2e": False, "force_decel": False})[idx]
+    if CAR_MODE == "toyota":   # same maneuver, Camry CarParams (or a diag variant)
+      use_camry_planner()
+    import contextlib, io
+    with contextlib.redirect_stdout(io.StringIO()):
+      valid, out = man.evaluate()
+    return mode, man.title, dict(valid=valid, min_gap=float(out[:, 6].min()))
+  stock = set_tune(*TUNES["stock 1.25"])
+  v = 45 * MPH
+  return mode, "lead brakes 2.0 from 45 mph (stock)", run(lambda t: max(0.0, v - 2.0 * t), v, None, 25.0)
+
+
+def diag():
+  """Checks the bench against openpilot's own CI maneuvers, with the CI Honda CarParams and with the Camry's."""
+  from multiprocessing import Pool
+  from openpilot.selfdrive.test.longitudinal_maneuvers.test_longitudinal import create_maneuvers
+  n = len(create_maneuvers({"e2e": False, "force_decel": False}))
+  modes = ("honda", "toyota")
+  if "--ab" in sys.argv:   # A/B: which Camry CarParams field makes it differ from Honda
+    modes = ("honda", "toyota", "mix:honda:id", "mix:honda:geom", "mix:honda:rest", "mix:toyota:allbut_id", "mix:toyota:id")
+    keep = [i for i, m in enumerate(create_maneuvers({"e2e": False, "force_decel": False}))
+            if "decel" in m.title or m.title.startswith("approach stopped car at 20m/s, initial distance 90m")]
+  else:
+    keep = list(range(n))
+  jobs = [(m, i) for m in modes for i in keep + [-1]]
+  with Pool(os.cpu_count(), maxtasksperchild=1) as pool:   # fresh process per job: no patches leak between jobs
+    for mode, title, r in sorted(pool.imap_unordered(diag_job, jobs), key=lambda x: (x[0], x[1])):
+      if "valid" in r:
+        print(f"  {mode:20s} {'PASS' if r['valid'] else 'FAIL'}  min gap {r['min_gap']:6.1f} m  {title}")
+      else:
+        print(f"  {mode:20s} {'CRASH' if r['crash'] else 'ok   '}  min gap {r['min_gap_m']:6.1f} m  decel {r['min_a']:.2f}  {title}")
+
+
+if __name__ == "__main__":
+  diag() if "--diag" in sys.argv else main()
