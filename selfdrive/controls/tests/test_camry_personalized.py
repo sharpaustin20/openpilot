@@ -1,6 +1,8 @@
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from openpilot.selfdrive.controls.lib import camry_personalized as cp
@@ -272,3 +274,109 @@ class TestSuggestionGate:
     offered, dropped, gate, _ = sl.gate_in_groups(self.CUR, self.CHANGES, self.FULL, lambda *a: {"verdict": "fail", "worse": ["x: crash"]})
     assert offered == [] and gate is self.FULL and [c["field"] for c in dropped] == ["coast_margin_s", "min_ttc_s", "follow_s"]
     assert all(c["dropped"] == "the bench showed: x: crash" for c in dropped)
+
+
+class TestOverspeed:
+  """Glide over set speed: coast within the allowance, linearly firmer past it, capped; only when speed is the reason."""
+  def gov(self, mph=3.0, glide=True):
+    return GlideGovernor(live=False, settings=PersonalizedSettings(glide=glide, overspeed_glide_mph=mph))
+
+  def test_default_on_and_clamped(self):
+    assert PersonalizedSettings().overspeed_glide_mph == 3.0
+    assert parse_settings({"overspeed_glide_mph": 50}).overspeed_glide_mph == 10.0
+    assert parse_settings({"overspeed_glide_mph": -1}).overspeed_glide_mph == 0.0
+
+  def test_coasts_within_allowance(self):
+    g, v_t = self.gov(), 20.0
+    assert g.apply_overspeed(-0.8, v_t + 2 * cp.MPH, v_t, -0.3, True) == -0.3   # flat: the car's own coast
+    assert g.zone == "overspeed" and g.active
+    assert g.apply_overspeed(-0.8, v_t + 2 * cp.MPH, v_t, 0.2, True) == 0.0    # downhill: hold speed, no throttle
+    assert g.apply_overspeed(-0.8, v_t + 2 * cp.MPH, v_t, -0.9, True) == -0.5  # uphill: never below the coast minimum
+
+  def test_linear_ramp_then_capped(self):
+    g, v_t = self.gov(), 20.0
+    assert g.apply_overspeed(-3.0, v_t + 5.5 * cp.MPH, v_t, -0.3, True) == pytest.approx(-0.65, abs=0.01)  # halfway up the ramp
+    assert g.apply_overspeed(-3.0, v_t + 8 * cp.MPH, v_t, -0.3, True) == pytest.approx(cp.OVERSPEED_BRAKE)
+    assert g.apply_overspeed(-3.0, v_t + 20 * cp.MPH, v_t, -0.3, True) == pytest.approx(cp.OVERSPEED_BRAKE)  # never harder for speed alone
+    outs = [g.apply_overspeed(-3.0, v_t + x * cp.MPH, v_t, -0.3, True) for x in np.arange(0.5, 12.0, 0.25)]
+    steps = np.diff(outs)
+    assert steps.max() <= 0.0 and -steps.min() < 0.05   # firmer the further over, in small steps, never a jump
+
+  def test_never_adds_throttle_or_acts_under_target(self):
+    g = self.gov()
+    assert g.apply_overspeed(0.3, 22.0, 20.0, -0.3, True) == 0.3
+    assert g.apply_overspeed(-0.1, 22.0, 20.0, -0.3, True) == -0.1
+    assert g.apply_overspeed(-0.8, 19.0, 20.0, -0.3, True) == -0.8   # under the target: speed is not why it brakes
+
+  def test_only_when_speed_is_the_reason(self):
+    g = self.gov()
+    assert g.apply_overspeed(-0.8, 22.0, 20.0, -0.3, False) == -0.8               # a lead, curve, stop or e2e is limiting
+    assert self.gov(mph=0.0).apply_overspeed(-0.8, 22.0, 20.0, -0.3, True) == -0.8   # setting off
+    assert self.gov(glide=False).apply_overspeed(-0.8, 22.0, 20.0, -0.3, True) == -0.8   # Glide toggle off
+    assert g.apply_overspeed(-0.8, 4.0, 3.0, -0.3, True) == -0.8                   # too slow
+
+  def test_blocked_after_fast_closing_lead_then_recovers(self):
+    g = self.gov()
+    run(g, 40, -1.0, lead(1.3, vrel=-8.0))   # TTC gate trips
+    assert g.apply_overspeed(-0.8, 22.0, 20.0, -0.3, True) == -0.8
+    for _ in range(25):   # that lead is gone: the hold runs out within about a second
+      g.observe(21.0, lead(1.3, prob=0.1), T_FOLLOW)
+    assert g.apply_overspeed(-0.8, 21.0, 20.0, -0.3, True) == -0.3   # 2.2 mph over: within the allowance
+
+  def test_safe_wrapper_bounds_and_disables(self):
+    class Bad(GlideGovernor):
+      def apply_overspeed(self, *a):
+        return 5.0
+    sg = cp.SafeGlide(Bad(live=False, settings=PersonalizedSettings()))
+    assert sg.apply_overspeed(-0.8, 22.0, 20.0, -0.3, True) == -0.8 and not sg.failed
+
+    class Boom(GlideGovernor):
+      def apply_overspeed(self, *a):
+        raise RuntimeError("x")
+    sg = cp.SafeGlide(Boom(live=False, settings=PersonalizedSettings()))
+    assert sg.apply_overspeed(-0.8, 22.0, 20.0, -0.3, True) == -0.8 and sg.failed
+
+
+class TestApproach:
+  """Approach taper: ease acceleration off while closing on a slower lead so the car coasts into the gap."""
+  TARGET = T_FOLLOW * 26.8 + 6.0   # target gap (m) at 26.8 m/s
+
+  def test_no_cap_far_or_not_closing(self):
+    s = PersonalizedSettings()
+    assert cp.approach_cap(s, 150.0, 0.0, 26.8, T_FOLLOW) is None       # same speed
+    assert cp.approach_cap(s, 150.0, -2.0, 26.8, T_FOLLOW) is None      # lead pulling away
+    assert cp.approach_cap(s, 300.0, 3.0, 26.8, T_FOLLOW) is None       # far back, closing slowly
+    assert cp.approach_cap(replace(s, approach=False), 60.0, 8.0, 26.8, T_FOLLOW) is None
+
+  def test_taper_to_coast(self):
+    s = PersonalizedSettings()   # approach_decel 0.5, coast -0.3; 100 m of room: needed decel = closing^2 / 200
+    assert cp.approach_cap(s, self.TARGET + 100.0, 10.0, 26.8, T_FOLLOW) == pytest.approx(-0.3)        # needs 0.5: coast
+    assert cp.approach_cap(s, self.TARGET + 100.0, 5.0, 26.8, T_FOLLOW) is None                        # needs 0.125: no cap yet
+    assert cp.approach_cap(s, self.TARGET + 100.0, 7.9, 26.8, T_FOLLOW) == pytest.approx(0.35, abs=0.02)   # halfway down
+    assert cp.approach_cap(s, self.TARGET - 5.0, 3.0, 26.8, T_FOLLOW) is None                          # inside the gap: glide's job
+    caps = [cp.approach_cap(s, self.TARGET + 100.0, c, 26.8, T_FOLLOW) for c in np.arange(5.1, 10.0, 0.1)]
+    assert all(b <= a + 1e-9 for a, b in zip(caps, caps[1:], strict=False))   # firmer the faster we close
+    assert cp.approach_cap(replace(s, approach_decel=1.0), self.TARGET + 100.0, 10.0, 26.8, T_FOLLOW) == pytest.approx(0.57, abs=0.02)   # firmer plan: later lift
+
+  def test_governor_caps_accel_only(self):
+    g = governor()
+    ld = lead(3.0, vrel=-9.0)   # 86 m back, closing 9 m/s: needs about 1 m/s2 to arrive at the gap -> lift off and coast
+    assert run(g, 40, 0.8, ld, source_is_lead=False) == g.settings.coast_accel
+    assert g.zone == "approach" and g.active
+    assert run(g, 1, -1.5, ld, source_is_lead=False) == -1.5          # braking passes through
+    assert not g.active
+    ld2 = lead(2.0, vrel=-12.0)                                        # TTC 5 s: the glide gates block, the cap still applies
+    assert run(g, 25, 0.8, ld2, source_is_lead=False) == g.settings.coast_accel
+    assert g.zone == "approach"
+    assert run(governor(), 5, 0.8, ld) == 0.8                          # lead not yet stable: no cap
+
+  def test_safe_wrapper_allows_the_cap_but_not_braking(self):
+    class Cap(GlideGovernor):
+      def apply(self, a, *_):
+        return -0.3
+    assert cp.SafeGlide(Cap(live=False, settings=PersonalizedSettings())).apply(0.8, False, ACCEL_MIN) == -0.3
+
+    class Brake(GlideGovernor):
+      def apply(self, a, *_):
+        return -2.0
+    assert cp.SafeGlide(Brake(live=False, settings=PersonalizedSettings())).apply(0.8, False, ACCEL_MIN) == 0.8
