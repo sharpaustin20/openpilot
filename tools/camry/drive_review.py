@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+# Read-only review of a drive, car OFF: did the PR #8 planner run, how did following and glide behave, and where did
+# sunnypilot brake only because it was over its target speed (the case for the overspeed-glide setting).
+#   cd /data/openpilot && PYTHONPATH=/data/openpilot python3 system/hardware/test_job.py \
+#     /usr/local/venv/bin/python3 /tmp/drive_review.py [--last N | ROUTE ...] [--out /tmp/drive_review.json]
+# Prints about 40 lines; details (every overspeed episode) go to the JSON file. Writes nothing else.
+import argparse
+import json
+import os
+import sys
+from multiprocessing import Pool
+
+import numpy as np
+
+MPH = 2.237
+STOP_DISTANCE = 6.0
+REALDATA = "/data/media/0/realdata"
+ONROAD_PARAM = "/data/params/d/IsOnroad"
+SP_SRC = {0: "cruise", 1: "sccVision", 2: "sccMap", 3: "speedLimitAssist"}
+PLAN_SRC = {0: "cruise", 1: "lead0", 2: "lead1", 3: "lead2", 4: "e2e"}
+COAST_A = -0.35          # m/s^2, requests above this count as coasting (the Camry's own coast is about -0.3)
+OVER_A = -0.3            # a request below this while over the target speed counts as overspeed braking
+OVER_V = 0.3             # m/s over the target before it counts (0.7 mph)
+BINS = [(0, 20), (20, 35), (35, 50), (50, 65), (65, 200)]
+# target gaps (s) by personality: Aggressive slot = PR #7 table before PR #8, the Personalized default table after
+PR7 = ([17.9, 26.8], [1.0, 1.45])
+PR8 = ([35 / MPH, 40 / MPH, 60 / MPH], [0.8, 1.0, 1.45])
+
+
+def onroad():
+  try:
+    with open(ONROAD_PARAM, "rb") as f:
+      return f.read().strip() == b"1"
+  except OSError:
+    return False
+
+
+def segments(root, routes):
+  segs = []
+  for d in os.listdir(root):
+    if "--" not in d:
+      continue
+    r, s = d.rsplit("--", 1)
+    if r in routes and s.isdigit():
+      for name in ("rlog.zst", "rlog.bz2", "rlog"):
+        p = os.path.join(root, d, name)
+        if os.path.exists(p):
+          segs.append((r, int(s), p))
+          break
+  return sorted(segs)
+
+
+def read_segment(path):
+  """One segment -> (git, branch, personalized log line, ticks at longitudinalPlan rate)."""
+  if onroad():
+    return None
+  from openpilot.tools.lib.logreader import LogReader
+  git = branch = pers = None
+  cs = cc = sp = rs = ss = ctl = None
+  ticks = []
+  for m in LogReader(path):
+    w = m.which()
+    if w == "carState":
+      cs = m.carState
+    elif w == "longitudinalPlan":
+      if cs is None or ctl is None:
+        continue
+      lp = m.longitudinalPlan
+      pitch = float(cc.orientationNED[1]) if cc is not None and len(cc.orientationNED) == 3 else 0.0
+      lead = rs.leadOne if rs is not None else None
+      ticks.append((m.logMonoTime * 1e-9, cs.vEgo, cs.vCruise / 3.6, ctl.longControlState.raw != 0, cs.gasPressed, cs.brakePressed,
+                    lp.aTarget, lp.longitudinalPlanSource.raw, lp.hasLead, lp.shouldStop,
+                    sp.longitudinalPlanSource.raw if sp is not None else 0, sp.vTarget if sp is not None else 0.0,
+                    sp.speedLimit.resolver.speedLimit if sp is not None else 0.0, sp.speedLimit.resolver.speedLimitOffset if sp is not None else 0.0,
+                    bool(sp.speedLimit.resolver.speedLimitValid) if sp is not None else False,
+                    bool(sp.speedLimit.assist.active) if sp is not None else False,
+                    bool(sp.smartCruiseControl.vision.active or sp.smartCruiseControl.map.active) if sp is not None else False,
+                    ss.personality.raw if ss is not None else 1, bool(ss.enabled) if ss is not None else False,
+                    bool(lead.status) if lead is not None else False, lead.dRel if lead is not None else 0.0,
+                    lead.vRel if lead is not None else 0.0, pitch))
+    elif w == "controlsState":
+      ctl = m.controlsState
+    elif w == "carControl":
+      cc = m.carControl
+    elif w == "longitudinalPlanSP":
+      sp = m.longitudinalPlanSP
+    elif w == "radarState":
+      rs = m.radarState
+    elif w == "selfdriveState":
+      ss = m.selfdriveState
+    elif w == "initData":
+      git, branch = m.initData.gitCommit[:7], m.initData.gitBranch
+    elif w == "logMessage" and pers is None and "camry personalized" in m.logMessage:
+      pers = m.logMessage[:400]
+  return git, branch, pers, ticks
+
+
+def t_follow(personality, v, pr8):
+  if personality == 2:
+    return 1.75
+  if personality == 1:
+    return 1.45
+  bp, vals = PR8 if pr8 else PR7
+  return float(np.interp(v, bp, vals))
+
+
+def episodes(mask, t, max_gap=1.0):
+  """[(i0, i1)] runs of True in mask, joined when the gap between them is at most max_gap seconds."""
+  idx = np.flatnonzero(mask)
+  if len(idx) == 0:
+    return []
+  runs, start, prev = [], idx[0], idx[0]
+  for i in idx[1:]:
+    if t[i] - t[prev] > max_gap:
+      runs.append((start, prev))
+      start = i
+    prev = i
+  runs.append((start, prev))
+  return runs
+
+
+def mmss(s):
+  return f"{int(s // 60):d}:{int(s % 60):02d}"
+
+
+def main():
+  ap = argparse.ArgumentParser()
+  ap.add_argument("routes", nargs="*")
+  ap.add_argument("--root", default=REALDATA)
+  ap.add_argument("--last", type=int, default=1, help="newest N routes when none are given")
+  ap.add_argument("--out", default="/tmp/drive_review.json")
+  ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+  a = ap.parse_args()
+  if onroad():
+    sys.exit("car is onroad; run this with the car off")
+  routes = set(a.routes)
+  if not routes:
+    names = sorted({d.rsplit("--", 1)[0] for d in os.listdir(a.root) if "--" in d})
+    routes = set(names[-a.last:])
+  segs = segments(a.root, routes)
+  if not segs:
+    sys.exit(f"no segments for {sorted(routes)} under {a.root}")
+  print(f"routes {sorted(routes)}: {len(segs)} segments, {a.jobs} workers", flush=True)
+  with Pool(a.jobs) as pool:
+    results = pool.map(read_segment, [p for _, _, p in segs])
+  if any(r is None for r in results):
+    sys.exit("car turned on; stopped")
+
+  # per route: time runs from the route's first tick; routes are laid end to end (a reboot resets the log clock)
+  by_route = {}
+  for (route, _, _), (git, branch, p, ticks) in zip(segs, results, strict=True):
+    r = by_route.setdefault(route, dict(code=set(), pr8=None, rows=[]))
+    if git:
+      r["code"].add(f"{git} ({branch})")
+    r["pr8"] = r["pr8"] or p
+    r["rows"] += ticks
+  print("\n== install")
+  blocks, spans, offset = [], [], 0.0
+  for n, (route, r) in enumerate(sorted(by_route.items()), 1):
+    line = "YES: " + r["pr8"][:120] if r["pr8"] else "NOT found (PR #8 was not running on this route)"
+    print(f"  route {n} {route}: code {', '.join(sorted(r['code'])) or 'unknown'}; PR #8 planner line: {line}")
+    if r["rows"]:
+      B = np.array(r["rows"], dtype=float)
+      B[:, 0] += offset - B[0, 0]
+      spans.append((n, offset, B[-1, 0]))
+      blocks.append(np.hstack([B, np.full((len(B), 1), float(r["pr8"] is not None))]))
+      offset = B[-1, 0] + 60.0
+  if not blocks:
+    sys.exit("no longitudinalPlan data")
+  A = np.vstack(blocks)
+  t = A[:, 0]
+  dt = np.diff(t, append=t[-1] + 0.05).clip(0, 0.2)
+  v, long_on, gas, brake = A[:, 1], A[:, 3] > 0.5, A[:, 4] > 0.5, A[:, 5] > 0.5
+  a_tgt, src, stop = A[:, 6], A[:, 7].astype(int), A[:, 9] > 0.5
+  sp_src, v_tgt, lim, lim_off = A[:, 10].astype(int), A[:, 11], A[:, 12], A[:, 13]
+  lim_ok, sla_on = A[:, 14] > 0.5, A[:, 15] > 0.5
+  pers_raw, enabled, l_ok, d_rel, v_rel, pitch = A[:, 17].astype(int), A[:, 18] > 0.5, A[:, 19] > 0.5, A[:, 20], A[:, 21], A[:, 22]
+  pr8_tick = A[:, 23] > 0.5
+  eng = long_on & enabled
+
+  def when(i):
+    for n, lo, hi in spans:
+      if lo <= t[i] <= hi:
+        return f"route {n} {mmss(t[i] - lo)}"
+    return mmss(t[i])
+
+  by_pers = ", ".join(f"{n} {mmss(dt[eng & (pers_raw == k)].sum())}" for k, n in ((0, 'personalized/aggressive'), (1, 'standard'), (2, 'relaxed')))
+  print(f"\n== drive: {mmss(dt.sum())} total, engaged {mmss(dt[eng].sum())}, {(dt[eng] * v[eng]).sum() / 1609:.1f} mi engaged; {by_pers}")
+
+  # following
+  fol = eng & (src == 1) & l_ok & (v > 2.0)
+  gap = (d_rel - STOP_DISTANCE) / np.maximum(v, 0.1)
+  tf = np.array([t_follow(p, vv, f) for p, vv, f in zip(pers_raw, v, pr8_tick, strict=True)])
+  print(f"\n== following (engaged, lead is the limiting source): {mmss(dt[fol].sum())}")
+  for lo, hi in BINS:
+    m = fol & (v * MPH >= lo) & (v * MPH < hi)
+    if dt[m].sum() > 10:
+      brk_pct = dt[m & (a_tgt < -0.5)].sum() / max(dt[m].sum(), 0.01) * 100
+      print(f"  {lo:>2}-{hi:<3} mph: {mmss(dt[m].sum())}, gap median {np.median(gap[m]):.2f} s (target {np.median(tf[m]):.2f}), "
+            + f"braking under -0.5: {brk_pct:.0f}% of the time")
+  band = fol & (gap < tf) & (gap >= tf - 0.2) & (v_rel > -2.0)
+  below = fol & (gap < tf - 0.2) & (gap >= tf - 0.45) & (v_rel > -2.0)
+  for name, m in (("coast band (0-0.2 s under target, not closing fast)", band), ("light band (0.2-0.45 s under)", below)):
+    tot = dt[m].sum()
+    if tot > 0:
+      coast_pct, brake_pct = dt[m & (a_tgt >= COAST_A)].sum() / tot * 100, dt[m & (a_tgt < COAST_A)].sum() / tot * 100
+      print(f"  {name}: {mmss(tot)}; coasting {coast_pct:.0f}%, braking harder than -0.35: {brake_pct:.0f}%"
+            + f" (glide {'on' if pr8_tick[m].all() else 'on for part of it' if pr8_tick[m].any() else 'not installed'})")
+  prev_eng = np.roll(eng, 1)
+  gas_on = eng & gas & ~np.roll(gas, 1) & l_ok
+  brk_on = prev_eng & brake & ~np.roll(brake, 1)
+  per_hour = (gas_on.sum() + brk_on.sum()) / max(dt[eng].sum() / 3600, 0.01)
+  print(f"  gas presses with a lead while engaged: {int(gas_on.sum())}; brake takeovers: {int(brk_on.sum())}; per engaged hour: {per_hour:.1f}")
+
+  # overspeed braking: engaged, no lead limiting, over the target speed, planner asks for braking
+  over = v - v_tgt
+  base = eng & (src == 0) & ~stop & (over > OVER_V) & (a_tgt < OVER_A)
+  glideable = base & ((sp_src == 0) | (sp_src == 3))
+  curve = base & ((sp_src == 1) | (sp_src == 2))
+  e2e_over = eng & (src == 4) & (over > OVER_V) & (a_tgt < OVER_A)
+  print(f"\n== overspeed braking (engaged, no lead, over the target speed, request under {OVER_A} m/s2)")
+  print(f"  set speed / speed limit target: {mmss(dt[glideable].sum())}; curve target (not for glide): {mmss(dt[curve].sum())}; "
+        + f"end-to-end model: {mmss(dt[e2e_over].sum())}; speed limit assist active {mmss(dt[eng & sla_on].sum())} of the drive")
+  for x in (3, 5, 8):
+    print(f"  X = {x} mph would cover {mmss(dt[glideable & (over * MPH <= x)].sum())} of it")
+  eps = []
+  for i0, i1 in episodes(glideable, t):
+    m = np.zeros(len(t), bool)
+    m[i0:i1 + 1] = True
+    m &= glideable
+    limit_mph = round(float(np.median(lim[m])) * MPH, 1) if lim_ok[m].any() else None
+    eps.append(dict(start=when(i0), dur_s=round(float(dt[m].sum()), 1), over_mph=round(float(over[m].max() * MPH), 1),
+                    v_mph=round(float(v[m].max() * MPH), 1), target_mph=round(float(np.median(v_tgt[m]) * MPH), 1),
+                    source=SP_SRC.get(int(np.median(sp_src[m])), "?"), limit_mph=limit_mph, offset=round(float(np.median(lim_off[m])), 2),
+                    min_a=round(float(a_tgt[m].min()), 2), pitch_deg=round(float(np.degrees(pitch[m].mean())), 1)))
+  eps.sort(key=lambda e: -e["dur_s"])
+  print(f"  {len(eps)} episode(s); longest:")
+  for e in eps[:8]:
+    slope = 'downhill' if e['pitch_deg'] < -0.5 else 'uphill' if e['pitch_deg'] > 0.5 else 'flat'
+    limit = f", limit {e['limit_mph']} +{e['offset']}" if e['limit_mph'] is not None else ""
+    print(f"    at {e['start']}: {e['dur_s']} s, {e['v_mph']} mph vs target {e['target_mph']} ({e['source']}{limit}), "
+          + f"over by {e['over_mph']} mph, braking to {e['min_a']} m/s2, pitch {e['pitch_deg']} deg ({slope})")
+  drops = eng & (sp_src == 3) & (np.roll(v_tgt, 20) - v_tgt > 2.0) & (t - np.roll(t, 20) < 2.0)
+  print(f"  speed-limit target drops of more than 4.5 mph while engaged: {len(episodes(drops, t))}")
+
+  with open(a.out, "w") as f:
+    json.dump(dict(routes=sorted(routes), code=sorted(set().union(*(r['code'] for r in by_route.values()))),
+                   pr8_line={k: r['pr8'] for k, r in by_route.items()}, engaged_s=float(dt[eng].sum()),
+                   overspeed_s=float(dt[glideable].sum()), curve_s=float(dt[curve].sum()), episodes=eps), f, indent=1)
+  print(f"\nwritten: {a.out}")
+
+
+if __name__ == "__main__":
+  main()
