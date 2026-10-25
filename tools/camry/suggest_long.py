@@ -21,6 +21,9 @@ MIN_EVENTS_SAFETY = 2    # brake takeovers at/under the target gap: suggest soon
 TTC_LATE_S = 15.0        # brake takeovers with a longer time to collision than this aren't about closing speed
 MIN_STEADY = 30          # steady-gap samples per speed bin before the manual gap counts
 STEP_S = 0.05            # s, one step on the follow table (Apply allows up to 0.1)
+# the learner never suggests a gap closer than this: the driver chose 1.1 s at every speed so cars don't cut in, and
+# let the learner move it down to 1.0 s (2026-10-25), even though the driver follows closer when driving manually
+LEARN_MIN_FOLLOW_S = 1.0
 # driver_profile speed bins -> the follow table point they inform (mph)
 BIN_TO_BP = {"20-35": 35, "35-50": 40, "50-65": 60, "65-+": 60}
 # soft plan strength (soft_distance_factor): firmer after brake takeovers inside the glide band, softer after a long
@@ -82,7 +85,9 @@ def suggest_follow(tot, settings):
       if abs(med - vals[i]) >= STEP_S:
         new[i] = vals[i] + (STEP_S if med > vals[i] else -STEP_S)
         why.append(f"you follow at {med:.2f} s manually at {b} mph ({len(man)} samples)")
-  new = [round(min(max(v, cp.MIN_FOLLOW_S), cp.MAX_FOLLOW_S), 2) for v in new]
+  if any(v < LEARN_MIN_FOLLOW_S for v in vals):
+    why.append(f"under the {LEARN_MIN_FOLLOW_S:.1f} s learning floor you chose: farther")
+  new = [round(min(max(v, LEARN_MIN_FOLLOW_S), cp.MAX_FOLLOW_S), 2) for v in new]
   if new == [round(v, 2) for v in vals]:
     return None
   return dict(field="follow_s", bp_mph=bp_mph, to=new, why="; ".join(why), **{"from": [round(v, 2) for v in vals]})

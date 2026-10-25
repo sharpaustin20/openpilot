@@ -37,6 +37,7 @@ TUNES = {
   "stock 1.25":     ([0], [1.25]),
   "PR7 1.0":        ([40, 60], [1.0, 1.45]),
   "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
+  "flat 1.1":       ([35, 40, 60], [1.1, 1.1, 1.1]),
 }
 # settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have both on)
 OFF = cp.PersonalizedSettings(glide=False, soft_plan=False)
@@ -46,6 +47,7 @@ DEFAULTS = cp.PersonalizedSettings()   # what the car runs after the update with
 SETTINGS = {
   "0.8 + glide":    (TUNES["0.8 to 35"], GLIDE),
   "0.8 + glide+soft": (TUNES["0.8 to 35"], SOFT),
+  "1.1 + defaults": (TUNES["flat 1.1"], DEFAULTS),
   "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
   "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
@@ -57,7 +59,7 @@ TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
 # GLIDE CHECK: each glide tune against the same gaps without glide
-BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "standard + defaults": "standard",
+BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "1.1 + defaults": "flat 1.1", "standard + defaults": "standard",
            "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
 CUR_PERSONALITY = [AGG]
