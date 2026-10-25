@@ -99,11 +99,13 @@ Personal sunnypilot branch for one car:
      closing on a slower lead, the acceleration request is tapered off
      once arriving at the lead's speed right at the target gap would need
      more than a quarter of the closing-in decel (default 0.5 m/s², the
-     page's "Closing-In Decel"), down to a plain coast when it would need
-     all of it: the car lifts off early and glides into the gap instead of
-     running up and braking. It only ever lowers an acceleration request;
-     braking, FCW and the glide safety gates are untouched. Off below
-     11 mph.
+     page's "Closing-In Decel"), down to no acceleration at all when it
+     would need all of it: the car stops gaining speed early and eases
+     into the gap instead of running up and braking. It only ever lowers
+     a positive acceleration request, never below zero; braking requests,
+     FCW and the glide safety gates are untouched. The closing speed it
+     uses is filtered over 1 s (a noisy estimate on this car). Off below
+     11 mph; switching it off applies mid-drive like Glide and Soft Plan.
    - **Soft plan** (on by default): while glide may act, the planner's
      weight on holding the exact distance is lowered (a runtime weight, no
      solver rebuild), so the plan itself glides. The too-close penalty is
@@ -111,8 +113,8 @@ Personal sunnypilot branch for one car:
      brake takeovers inside the glide band, one step softer after an hour
      engaged without one (never below 0.2).
    - **Settings** live in `/data/camry_long.json` (not a Params key, as with
-     the fan page), read once per drive; only switching Glide or Soft Plan
-     off applies mid-drive. Every value is validated and clamped; the gap
+     the fan page), read once per drive; only switching Glide, Soft Plan or Ease
+     Into The Gap off applies mid-drive. Every value is validated and clamped; the gap
      table can't go below 0.8 s or above 1.75 s, and the glide ranges stay
      inside what the bench has covered: coast decel -0.6 to -0.1 m/s², TTC
      gate 5-10 s, coast margin 0.05-0.5 s, light braking -1.5 to -0.5 m/s²,

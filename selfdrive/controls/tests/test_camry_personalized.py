@@ -338,45 +338,68 @@ class TestOverspeed:
 
 
 class TestApproach:
-  """Approach taper: ease acceleration off while closing on a slower lead so the car coasts into the gap."""
-  TARGET = T_FOLLOW * 26.8 + 6.0   # target gap (m) at 26.8 m/s
+  """Approach taper: ease a positive acceleration request off while closing on a slower lead, never below zero."""
+  V = 26.8
+
+  def gap_for(self, room, closing, t_follow=T_FOLLOW):
+    """Distance to the lead that leaves `room` m before the target gap at the lead's speed."""
+    return t_follow * (self.V - closing) + 6.0 + room
 
   def test_no_cap_far_or_not_closing(self):
     s = PersonalizedSettings()
-    assert cp.approach_cap(s, 150.0, 0.0, 26.8, T_FOLLOW) is None       # same speed
-    assert cp.approach_cap(s, 150.0, -2.0, 26.8, T_FOLLOW) is None      # lead pulling away
-    assert cp.approach_cap(s, 300.0, 3.0, 26.8, T_FOLLOW) is None       # far back, closing slowly
-    assert cp.approach_cap(replace(s, approach=False), 60.0, 8.0, 26.8, T_FOLLOW) is None
+    assert cp.approach_cap(s, 150.0, 0.0, self.V, T_FOLLOW) is None       # same speed
+    assert cp.approach_cap(s, 150.0, -2.0, self.V, T_FOLLOW) is None      # lead pulling away
+    assert cp.approach_cap(s, 300.0, 3.0, self.V, T_FOLLOW) is None       # far back, closing slowly
+    assert cp.approach_cap(replace(s, approach=False), 60.0, 8.0, self.V, T_FOLLOW) is None
+    assert cp.approach_cap(s, self.gap_for(-5.0, 3.0), 3.0, self.V, T_FOLLOW) is None   # inside the gap: glide's job
 
-  def test_taper_to_coast(self):
-    s = PersonalizedSettings()   # approach_decel 0.5, coast -0.3; 100 m of room: needed decel = closing^2 / 200
-    assert cp.approach_cap(s, self.TARGET + 100.0, 10.0, 26.8, T_FOLLOW) == pytest.approx(-0.3)        # needs 0.5: coast
-    assert cp.approach_cap(s, self.TARGET + 100.0, 5.0, 26.8, T_FOLLOW) is None                        # needs 0.125: no cap yet
-    assert cp.approach_cap(s, self.TARGET + 100.0, 7.9, 26.8, T_FOLLOW) == pytest.approx(0.35, abs=0.02)   # halfway down
-    assert cp.approach_cap(s, self.TARGET - 5.0, 3.0, 26.8, T_FOLLOW) is None                          # inside the gap: glide's job
-    caps = [cp.approach_cap(s, self.TARGET + 100.0, c, 26.8, T_FOLLOW) for c in np.arange(5.1, 10.0, 0.1)]
-    assert all(b <= a + 1e-9 for a, b in zip(caps, caps[1:], strict=False))   # firmer the faster we close
-    assert cp.approach_cap(replace(s, approach_decel=1.0), self.TARGET + 100.0, 10.0, 26.8, T_FOLLOW) == pytest.approx(0.57, abs=0.02)   # firmer: later lift
+  def test_taper_to_zero(self):
+    s = PersonalizedSettings()   # approach_decel 0.5; 100 m of room: needed decel = closing^2 / 200
+    assert cp.approach_cap(s, self.gap_for(100.0, 10.0), 10.0, self.V, T_FOLLOW) == pytest.approx(0.0)    # needs 0.5: pedal up
+    assert cp.approach_cap(s, self.gap_for(100.0, 5.0), 5.0, self.V, T_FOLLOW) is None                    # needs 0.125: no cap yet
+    assert cp.approach_cap(s, self.gap_for(100.0, 7.9), 7.9, self.V, T_FOLLOW) == pytest.approx(0.75, abs=0.02)   # halfway
+    assert cp.approach_cap(replace(s, approach_decel=1.0), self.gap_for(100.0, 10.0), 10.0, self.V, T_FOLLOW) == pytest.approx(1.0, abs=0.02)
+    caps = [cp.approach_cap(s, self.gap_for(100.0, c), c, self.V, T_FOLLOW) for c in np.arange(5.1, 10.0, 0.1)]
+    assert all(b <= a + 1e-9 for a, b in zip(caps, caps[1:], strict=False)) and min(caps) >= 0.0   # firmer the faster, never below 0
 
-  def test_governor_caps_accel_only(self):
+  def test_governor_caps_positive_requests_only(self):
     g = governor()
-    ld = lead(3.0, vrel=-9.0)   # 86 m back, closing 9 m/s: needs about 1 m/s2 to arrive at the gap -> lift off and coast
-    assert run(g, 40, 0.8, ld, source_is_lead=False) == g.settings.coast_accel
+    ld = lead(3.0, vrel=-9.0)   # 86 m back, closing 9 m/s: arriving at the gap would need about 0.7 m/s2 -> pedal up
+    assert run(g, 40, 0.8, ld, source_is_lead=False) == pytest.approx(0.0)
     assert g.zone == "approach" and g.active
     assert run(g, 1, -1.5, ld, source_is_lead=False) == -1.5          # braking passes through
+    assert run(g, 1, -0.2, ld, source_is_lead=False) == -0.2          # so does any request at or below zero
     assert not g.active
     ld2 = lead(2.0, vrel=-12.0)                                        # TTC 5 s: the glide gates block, the cap still applies
-    assert run(g, 25, 0.8, ld2, source_is_lead=False) == g.settings.coast_accel
+    assert run(g, 40, 0.8, ld2, source_is_lead=False) == pytest.approx(0.0)
     assert g.zone == "approach"
     assert run(governor(), 5, 0.8, ld) == 0.8                          # lead not yet stable: no cap
+
+  def test_filter_smooths_a_noisy_closing_speed(self):
+    g = governor()
+    run(g, 100, 0.8, lead(3.0, vrel=-6.0), source_is_lead=False)      # settled mid-taper (cap about 0.55)
+    outs = []
+    for i in range(40):                                                # estimate jumping 4.5 <-> 7.5 m/s: raw caps 1.1 <-> 0
+      outs.append(run(g, 1, 0.8, lead(3.0, vrel=-7.5 if i % 2 else -4.5), source_is_lead=False))
+    assert max(np.abs(np.diff(outs))) < 0.1 and 0.3 < np.mean(outs) < 0.8   # no frame-to-frame flicker
+    assert run(g, 100, 0.8, lead(3.0, vrel=-0.2), source_is_lead=False) == 0.8  # released once the lead stops closing
+
+  def test_mid_drive_switch_off(self, tmp_path):
+    path = str(tmp_path / "s.json")
+    write_settings(PersonalizedSettings(), path)
+    g = GlideGovernor(path=path, dt=0.05)
+    write_settings(PersonalizedSettings(approach=False), path)
+    g.refresh_settings(now=5.0)
+    assert not g.settings.approach and g.settings.glide
 
   def test_safe_wrapper_allows_the_cap_but_not_braking(self):
     class Cap(GlideGovernor):
       def apply(self, a, *_):
-        return -0.3
-    assert cp.SafeGlide(Cap(live=False, settings=PersonalizedSettings())).apply(0.8, False, ACCEL_MIN) == -0.3
+        return 0.2
+    assert cp.SafeGlide(Cap(live=False, settings=PersonalizedSettings())).apply(0.8, False, ACCEL_MIN) == 0.2
 
     class Brake(GlideGovernor):
       def apply(self, a, *_):
-        return -2.0
-    assert cp.SafeGlide(Brake(live=False, settings=PersonalizedSettings())).apply(0.8, False, ACCEL_MIN) == 0.8
+        return -0.3
+    assert cp.SafeGlide(Brake(live=False, settings=PersonalizedSettings())).apply(0.8, False, ACCEL_MIN) == 0.8    # below zero: rejected
+    assert cp.SafeGlide(Brake(live=False, settings=PersonalizedSettings())).apply(-0.2, False, ACCEL_MIN) == -0.2  # more braking: rejected

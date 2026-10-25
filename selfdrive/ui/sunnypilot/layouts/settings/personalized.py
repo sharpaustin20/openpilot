@@ -151,15 +151,16 @@ class PersonalizedLayout(Widget):
     for field, title, desc in (
       ("personalized", "Personalized Profile",
        "Your gap table in the Aggressive position of the distance button: Personalized, Standard, Relaxed. On by default; " +
-       "off = stock Aggressive (flat 1.25 s gap). Changes here apply at the next drive; only switching Glide or Soft Plan off applies right away."),
+       "off = stock Aggressive (flat 1.25 s gap). Changes here apply at the next drive; only switching Glide, Soft Plan or Ease Into The Gap " +
+       "off applies right away."),
       ("glide", "Glide",
        "In every distance mode: behind a lead, coast instead of braking while the gap is in the coast zone under that mode's target, " +
        "brake lightly in the zone below it, and brake normally below that. Off when closing fast, when the lead brakes hard, " +
        "right after a cut-in, or below 11 mph. Only ever asks for less braking; forward collision warning is unchanged."),
       ("approach", "Ease Into The Gap",
-       "Closing on a slower car, lift off early enough to coast into the gap instead of running up and braking: the accelerator " +
-       "eases off once arriving at the gap would take more than the closing-in decel below. Only ever less acceleration; braking " +
-       "is untouched. Off below 11 mph."),
+       "Closing on a slower car, ease the accelerator off early instead of running up and braking: acceleration tapers to zero " +
+       "as arriving at the gap would take more of the closing-in decel below. Only ever less acceleration, never below zero; " +
+       "braking is untouched. Off below 11 mph."),
       ("soft_plan", "Soft Plan",
        "The planner itself cares less about holding the exact distance while in the glide band, so it plans the glide " +
        "instead of braking to win the gap back. The too-close penalty is unchanged. On by default; the learner tunes its " +

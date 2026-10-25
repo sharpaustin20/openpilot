@@ -5,6 +5,7 @@
 #     /usr/local/venv/bin/python3 /tmp/drive_review.py [--last N | ROUTE ...] [--out /tmp/drive_review.json]
 # Prints about 40 lines; details (every overspeed episode) go to the JSON file. Writes nothing else.
 import argparse
+import ast
 import json
 import os
 import sys
@@ -22,9 +23,32 @@ COAST_A = -0.35          # m/s^2, requests above this count as coasting (the Cam
 OVER_A = -0.3            # a request below this while over the target speed counts as overspeed braking
 OVER_V = 0.3             # m/s over the target before it counts (0.7 mph)
 BINS = [(0, 20), (20, 35), (35, 50), (50, 65), (65, 200)]
-# target gaps (s) by personality: Aggressive slot = PR #7 table before PR #8, the Personalized default table after
+# target gaps (s) by personality: Aggressive slot = PR #7 table before PR #8, the Personalized table after (the installed
+# default, or the table in the route's settings log line)
 PR7 = ([17.9, 26.8], [1.0, 1.45])
-PR8 = ([35 / MPH, 40 / MPH, 60 / MPH], [0.8, 1.0, 1.45])
+try:
+  from openpilot.selfdrive.controls.lib import camry_personalized as _cp
+  PR8_DEFAULT = ([b / MPH for b in _cp.DEFAULT_FOLLOW_BP_MPH], list(_cp.DEFAULT_FOLLOW_S))
+except Exception:   # PR #8 not installed on this device: its first default table
+  PR8_DEFAULT = ([35 / MPH, 40 / MPH, 60 / MPH], [0.8, 1.0, 1.45])
+
+
+def personalized_table(pers_line):
+  """The Personalized gap table (m/s breakpoints, s) a route ran with, from its 'camry personalized settings' log line
+  (an override there wins), else the installed default; None when PR #8 was not running."""
+  if not pers_line:
+    return None
+  try:
+    msg = json.loads(pers_line).get("msg", pers_line)
+  except Exception:
+    msg = pers_line
+  try:
+    st = ast.literal_eval(msg.split("settings: ", 1)[1].strip())
+    if st.get("follow_bp_mph") and st.get("follow_s"):
+      return [b / MPH for b in st["follow_bp_mph"]], list(st["follow_s"])
+  except Exception:
+    pass
+  return PR8_DEFAULT
 
 
 def onroad():
@@ -95,12 +119,12 @@ def read_segment(path):
   return git, branch, pers, ticks
 
 
-def t_follow(personality, v, pr8):
+def t_follow(personality, v, table):
   if personality == 2:
     return 1.75
   if personality == 1:
     return 1.45
-  bp, vals = PR8 if pr8 else PR7
+  bp, vals = table or PR7
   return float(np.interp(v, bp, vals))
 
 
@@ -163,7 +187,9 @@ def main():
       B = np.array(r["rows"], dtype=float)
       B[:, 0] += offset - B[0, 0]
       spans.append((n, offset, B[-1, 0]))
-      blocks.append(np.hstack([B, np.full((len(B), 1), float(r["pr8"] is not None))]))
+      table = personalized_table(r["pr8"])
+      tf = [[t_follow(int(p), v, table)] for p, v in zip(B[:, 17], B[:, 1], strict=True)]   # the route's own target gaps
+      blocks.append(np.hstack([B, np.full((len(B), 1), float(r["pr8"] is not None)), np.array(tf)]))
       offset = B[-1, 0] + 60.0
   if not blocks:
     sys.exit("no longitudinalPlan data")
@@ -175,7 +201,7 @@ def main():
   sp_src, v_tgt, lim, lim_off = A[:, 10].astype(int), A[:, 11], A[:, 12], A[:, 13]
   lim_ok, sla_on = A[:, 14] > 0.5, A[:, 15] > 0.5
   pers_raw, enabled, l_ok, d_rel, v_rel, pitch = A[:, 17].astype(int), A[:, 18] > 0.5, A[:, 19] > 0.5, A[:, 20], A[:, 21], A[:, 22]
-  pr8_tick = A[:, 23] > 0.5
+  pr8_tick, tf = A[:, 23] > 0.5, A[:, 24]
   eng = long_on & enabled
 
   def when(i):
@@ -190,7 +216,6 @@ def main():
   # following
   fol = eng & (src == 1) & l_ok & (v > 2.0)
   gap = (d_rel - STOP_DISTANCE) / np.maximum(v, 0.1)
-  tf = np.array([t_follow(p, vv, f) for p, vv, f in zip(pers_raw, v, pr8_tick, strict=True)])
   print(f"\n== following (engaged, lead is the limiting source): {mmss(dt[fol].sum())}")
   for lo, hi in BINS:
     m = fol & (v * MPH >= lo) & (v * MPH < hi)
