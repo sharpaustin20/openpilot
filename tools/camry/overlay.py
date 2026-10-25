@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Lay a fetched git ref over the installed tree, under /tmp, so a branch can be benched on the comma without touching
 the installed code. The result is OUT/openpilot: every file that differs between HEAD and REF is written from REF,
-everything else is a symlink into the installed repo (so the prebuilt .so files are found), and the repo's own
-openpilot -> . link is reproduced so `import openpilot.x` resolves inside the overlay.
+everything else is a symlink into the installed repo (so the prebuilt .so files are found). Symlinks in the repo are
+reproduced with the same (relative) target, and the repo's openpilot/ package directory (whose entries are links
+like common -> ../common) is rebuilt, so `import openpilot.x` resolves inside the overlay.
 
   cd /data/openpilot && git fetch origin BRANCH && python3 /tmp/overlay.py FETCH_HEAD /tmp/pr9
   PYTHONPATH=/tmp/pr9/openpilot PYTHONDONTWRITEBYTECODE=1 python3 system/hardware/test_job.py \\
@@ -33,6 +34,9 @@ def main():
     while d:
       real_dirs.add(d)
       d = os.path.dirname(d)
+  pkg = os.path.join(repo, "openpilot")
+  if os.path.isdir(pkg) and not os.path.islink(pkg):
+    real_dirs.add("openpilot")   # its relative links must point into the overlay, not the installed tree
   os.makedirs(root)
 
   def expand(rel):
@@ -41,13 +45,14 @@ def main():
       child = os.path.join(rel, name) if rel else name
       if name == "__pycache__" or child in changed:
         continue
-      if child in real_dirs:
+      src_child = os.path.join(src, name)
+      if os.path.islink(src_child):
+        os.symlink(os.readlink(src_child), os.path.join(root, child))   # same target: relative links stay in the overlay
+      elif child in real_dirs:
         os.makedirs(os.path.join(root, child))
         expand(child)
-      elif not rel and name == "openpilot" and os.path.islink(os.path.join(src, name)):
-        os.symlink(".", os.path.join(root, name))   # the package link, kept inside the overlay
       else:
-        os.symlink(os.path.join(src, name), os.path.join(root, child))
+        os.symlink(src_child, os.path.join(root, child))
 
   expand("")
   written = 0
