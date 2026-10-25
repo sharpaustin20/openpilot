@@ -356,7 +356,7 @@ class TestApproach:
     assert cp.approach_cap(s, self.TARGET - 5.0, 3.0, 26.8, T_FOLLOW) is None                          # inside the gap: glide's job
     caps = [cp.approach_cap(s, self.TARGET + 100.0, c, 26.8, T_FOLLOW) for c in np.arange(5.1, 10.0, 0.1)]
     assert all(b <= a + 1e-9 for a, b in zip(caps, caps[1:], strict=False))   # firmer the faster we close
-    assert cp.approach_cap(replace(s, approach_decel=1.0), self.TARGET + 100.0, 10.0, 26.8, T_FOLLOW) == pytest.approx(0.57, abs=0.02)   # firmer plan: later lift
+    assert cp.approach_cap(replace(s, approach_decel=1.0), self.TARGET + 100.0, 10.0, 26.8, T_FOLLOW) == pytest.approx(0.57, abs=0.02)   # firmer: later lift
 
   def test_governor_caps_accel_only(self):
     g = governor()

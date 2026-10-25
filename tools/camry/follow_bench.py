@@ -42,7 +42,7 @@ TUNES = {
   "flat 1.1":       ([0], [1.1]),
 }
 # settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have both on)
-OFF = cp.PersonalizedSettings(glide=False, soft_plan=False)
+OFF = cp.PersonalizedSettings(glide=False, soft_plan=False, approach=False, overspeed_glide_mph=0.0)   # the plain planner
 GLIDE = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=False)
 SOFT = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=True)
 DEFAULTS = cp.PersonalizedSettings()   # what the car runs after the update with no settings file
