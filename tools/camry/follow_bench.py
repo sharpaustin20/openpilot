@@ -12,6 +12,7 @@
 #                                                   (used by suggest_long.py; --modes all adds Standard and Relaxed)
 import os
 import sys
+import time
 from dataclasses import replace
 os.environ.setdefault("OPENPILOT_PREFIX", "lbench")   # isolate params/msgq namespace from the real system
 
@@ -134,10 +135,21 @@ def set_tune(bp_mph, vals, settings=None, personality=AGG, real=False):
   return stock
 
 
+FRAME_T = [0.0, 0]   # planner.update() seconds and frames in this worker process (one job per process), for the per-frame cost
+
+
 def personalize(planner):
   st = CUR_SETTINGS[0]
   planner.glide = cp.SafeGlide(cp.GlideGovernor(dt=DT, live=False, settings=st))   # explicit settings, never the device's file
   planner.mpc.personalized = cp.follow_table_ms(st)   # None unless the tune's settings say Personalized
+  update = planner.update
+
+  def timed_update(sm):
+    t0 = time.perf_counter()
+    update(sm)
+    FRAME_T[0] += time.perf_counter() - t0
+    FRAME_T[1] += 1
+  planner.update = timed_update
   return planner
 
 
@@ -384,6 +396,12 @@ def job(args):
   bp, vals = TUNES[name]
   # each worker process gets its own copy of the patched module
   set_tune(bp, vals, SETTINGS[name][1] if name in SETTINGS else None, PERSONALITIES.get(name, AGG), name in REAL)
+  name, title, m = _job(name, idx)
+  m["frame_ms"] = 1000.0 * FRAME_T[0] / max(FRAME_T[1], 1)   # mean planner.update() time per 20 Hz frame, this scenario
+  return name, title, m
+
+
+def _job(name, idx):
   sc = scenarios()
   if idx < len(sc):
     title, prof, v0, d0, dur = sc[idx]
@@ -497,6 +515,8 @@ def main():
   worst = {n: dict(min_a=min(m["min_a"] for m in res[n].values()), fcw=sum(m["fcw"] for m in res[n].values()),
                    crashes=sum(m["crash"] for m in res[n].values())) for n in names}
   print("\nsummary: " + " | ".join(f"{n}: hardest {w['min_a']:.2f}, FCW frames {w['fcw']}, crashes {w['crashes']}" for n, w in worst.items()))
+  # planner cost: mean planner.update() time per frame over all scenarios of a tune (the comma's 20 Hz budget is 50 ms)
+  print("planner ms per frame: " + " | ".join(f"{n} {np.mean([m['frame_ms'] for m in res[n].values()]):.2f}" for n in names))
 
   # glide: braking time and gap behind the same lead, glide profiles vs their table without glide
   print(f"\nglide scenarios (seconds braking harder than {BRAKE_A:.1f} m/s2 / seconds gliding / gap at end s / min gap s):")
