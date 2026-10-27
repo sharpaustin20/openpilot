@@ -237,6 +237,39 @@ def main():
   per_hour = (gas_on.sum() + brk_on.sum()) / max(dt[eng].sum() / 3600, 0.01)
   print(f"  gas presses with a lead while engaged: {int(gas_on.sum())}; brake takeovers: {int(brk_on.sum())}; per engaged hour: {per_hour:.1f}")
 
+  # each takeover with its context: was it the routine end of an engaged stretch (slowing below what the PCM allows),
+  # or did the driver step in while following (closing on the lead, or under the target gap)?
+  takeovers = []
+  for kind, idx in (("brake", np.flatnonzero(brk_on)), ("gas", np.flatnonzero(gas_on))):
+    for i in idx:
+      j0, j1 = np.searchsorted(t, t[i] - 3.0), np.searchsorted(t, t[i] + 20.0)
+      gap_i = float(gap[i]) if l_ok[i] else None
+      closing = float(-v_rel[i]) if l_ok[i] else 0.0
+      v_min_after = float(v[i:j1].min() * MPH)
+      if kind == "brake" and v_min_after < 20.0:
+        why = "slowing below 20 mph (end of a stretch)"
+      elif l_ok[i] and closing > 1.0 and gap_i is not None and gap_i < tf[i] + 0.3:
+        why = "closing on the lead"
+      elif l_ok[i] and gap_i is not None and gap_i < tf[i] - 0.2:
+        why = "under the target gap"
+      elif l_ok[i]:
+        why = "behind a lead, not close"
+      else:
+        why = "no lead"
+      takeovers.append(dict(kind=kind, at=when(i), why=why, v_mph=round(float(v[i] * MPH), 1), v_min_20s_mph=round(v_min_after, 1),
+                            gap_s=None if gap_i is None else round(gap_i, 2), target_s=round(float(tf[i]), 2),
+                            closing_ms=round(closing, 1), min_a_3s=round(float(a_tgt[j0:i + 1].min()), 2),
+                            source=PLAN_SRC.get(int(src[i]), "?")))
+  if takeovers:
+    counts = {}
+    for k in takeovers:
+      counts[(k["kind"], k["why"])] = counts.get((k["kind"], k["why"]), 0) + 1
+    print("  takeovers by cause: " + "; ".join(f"{kind} {why}: {n}" for (kind, why), n in sorted(counts.items())))
+    for k in [k for k in takeovers if not k["why"].startswith("slowing")][:12]:
+      gap_txt = f"gap {k['gap_s']} s (target {k['target_s']}), closing {k['closing_ms']} m/s" if k["gap_s"] is not None else "no lead"
+      print(f"    {k['kind']} at {k['at']}: {k['why']}, {k['v_mph']} mph, {gap_txt}, planner min {k['min_a_3s']} m/s2 in the 3 s before "
+            + f"({k['source']})")
+
   # overspeed braking: engaged, no lead limiting, over the target speed, planner asks for braking
   over = v - v_tgt
   base = eng & (src == 0) & ~stop & (over > OVER_V) & (a_tgt < OVER_A)
@@ -271,7 +304,7 @@ def main():
   with open(a.out, "w") as f:
     json.dump(dict(routes=sorted(routes), code=sorted(set().union(*(r['code'] for r in by_route.values()))),
                    pr8_line={k: r['pr8'] for k, r in by_route.items()}, engaged_s=float(dt[eng].sum()),
-                   overspeed_s=float(dt[glideable].sum()), curve_s=float(dt[curve].sum()), episodes=eps), f, indent=1)
+                   overspeed_s=float(dt[glideable].sum()), curve_s=float(dt[curve].sum()), episodes=eps, takeovers=takeovers), f, indent=1)
   print(f"\nwritten: {a.out}")
 
 
