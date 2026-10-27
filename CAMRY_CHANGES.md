@@ -49,6 +49,9 @@ Personal sunnypilot branch for one car:
      Auto (testing) curve. It switches back as soon as the script exits
      (the marker holds the PID and process start time, so a crashed job
      or a stale marker after reboot is ignored).
+   - One test job at a time: while one runs, the wrapper refuses a second
+     one (exit code 75) without touching the marker, so the running job
+     stays marked. The parked learner retries 10 min later.
    - Car on: no effect, stock onroad CPU config (1689 MHz cap).
    - Once the device is overheated/critical (offroad this includes the
      stock 75 C offroad danger temp after 5 min), clocks drop to the
