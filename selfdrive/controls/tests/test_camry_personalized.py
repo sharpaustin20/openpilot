@@ -403,3 +403,25 @@ class TestApproach:
         return -0.3
     assert cp.SafeGlide(Brake(live=False, settings=PersonalizedSettings())).apply(0.8, False, ACCEL_MIN) == 0.8    # below zero: rejected
     assert cp.SafeGlide(Brake(live=False, settings=PersonalizedSettings())).apply(-0.2, False, ACCEL_MIN) == -0.2  # more braking: rejected
+
+
+class TestSuggestionRanges:
+  """suggest_long.suggest_glide never offers a value outside the settings' valid range (the 2026-10-26 run offered a
+  0.04 s coast margin, under the 0.05 s minimum)."""
+
+  @staticmethod
+  def _coasts(under_s, decel, end="coast", n=5):
+    # Personalized table at 50 mph is 0.8/1.0/1.45 interpolated: about 1.225 s
+    return [{"mph": 50.0, "gap_s": 1.225 - under_s, "end_gap_s": 1.225 - under_s - 0.02, "decel": decel, "end": end}
+            for _ in range(n)]
+
+  def test_values_stay_in_limits(self):
+    from openpilot.tools.camry import suggest_long as sl
+    cur = PersonalizedSettings(follow_bp_mph=(35.0, 40.0, 60.0), follow_s=(0.8, 1.0, 1.45))
+    out = {c["field"]: c["to"] for c in sl.suggest_glide({"coasts": self._coasts(0.04, -0.05, end="brake")}, cur)}
+    for field, v in out.items():
+      lo, hi = cp.LIMITS[field]
+      assert lo <= v <= hi, (field, v)
+    assert out["coast_margin_s"] == cp.LIMITS["coast_margin_s"][0]
+    assert out["light_width_s"] == cp.LIMITS["light_width_s"][0]
+    assert out["coast_accel"] == cp.LIMITS["coast_accel"][1]   # a near-zero coast decel is offered as the weakest allowed
