@@ -35,9 +35,35 @@ except Exception:   # PR #8 not installed on this device: its first default tabl
   PR8_DEFAULT = ([35 / MPH, 40 / MPH, 60 / MPH], [0.8, 1.0, 1.45])
 
 
-def personalized_table(pers_line):
+def defaults_for_commit(commit, repo="/data/openpilot"):
+  """The default Personalized table in the code a route ran (git show of that commit), so a review run from another
+  tree (an overlay with other defaults) still compares each drive with the gaps it actually had. None if unknown."""
+  if not commit:
+    return None
+  if commit not in _DEFAULTS_CACHE:
+    import re
+    import subprocess
+    table = None
+    try:
+      src = subprocess.run(["git", "-C", repo, "show", f"{commit}:selfdrive/controls/lib/camry_personalized.py"],
+                           capture_output=True, text=True, timeout=20, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0")).stdout
+      bp = re.search(r"^DEFAULT_FOLLOW_BP_MPH\s*=\s*\(([^)]*)\)", src, re.M)
+      vals = re.search(r"^DEFAULT_FOLLOW_S\s*=\s*\(([^)]*)\)", src, re.M)
+      if bp and vals:
+        table = ([float(x) / MPH for x in bp.group(1).split(",") if x.strip()], [float(x) for x in vals.group(1).split(",") if x.strip()])
+    except Exception:
+      pass
+    _DEFAULTS_CACHE[commit] = table
+  return _DEFAULTS_CACHE[commit]
+
+
+_DEFAULTS_CACHE: dict = {}
+
+
+def personalized_table(pers_line, commit=None):
   """The Personalized gap table (m/s breakpoints, s) a route ran with, from its 'camry personalized settings' log line
-  (an override there wins), else the installed default; None when PR #8 was not running."""
+  (an override there wins), else the default of the code that ran (commit), else this tree's default; None when PR #8
+  was not running."""
   if not pers_line:
     return None
   try:
@@ -50,7 +76,7 @@ def personalized_table(pers_line):
       return [b / MPH for b in st["follow_bp_mph"]], list(st["follow_s"])
   except Exception:
     pass
-  return PR8_DEFAULT
+  return defaults_for_commit(commit) or PR8_DEFAULT
 
 
 def onroad():
@@ -208,7 +234,8 @@ def main():
       events["alerts"] += [(x + shift, a) for x, a in r["alerts"]]
       events["glide_fail"] += [(x + shift, msg) for x, msg in r["glide_fail"]]
       spans.append((n, offset, B[-1, 0]))
-      table = personalized_table(r["pr8"])
+      commit = sorted(r["code"])[0].split()[0] if r["code"] else None
+      table = personalized_table(r["pr8"], commit)
       tf = [[t_follow(int(p), v, table)] for p, v in zip(B[:, 17], B[:, 1], strict=True)]   # the route's own target gaps
       blocks.append(np.hstack([B, np.full((len(B), 1), float(r["pr8"] is not None)), np.array(tf)]))
       offset = B[-1, 0] + 60.0
