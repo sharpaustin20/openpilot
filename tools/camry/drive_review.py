@@ -22,6 +22,8 @@ PLAN_SRC = {0: "cruise", 1: "lead0", 2: "lead1", 3: "lead2", 4: "e2e"}
 COAST_A = -0.35          # m/s^2, requests above this count as coasting (the Camry's own coast is about -0.3)
 OVER_A = -0.3            # a request below this while over the target speed counts as overspeed braking
 OVER_V = 0.3             # m/s over the target before it counts (0.7 mph)
+RUNUP_A = 0.3            # m/s^2, an acceleration request above this behind a lead starts a possible run-up
+RUNUP_S = 8.0            # s, braking this soon after the acceleration ends counts as a run-up
 BINS = [(0, 20), (20, 35), (35, 50), (50, 65), (65, 200)]
 # target gaps (s) by personality: Aggressive slot = PR #7 table before PR #8, the Personalized table after (the installed
 # default, or the table in the route's settings log line)
@@ -303,6 +305,25 @@ def main():
       print(f"    {k['kind']} at {k['at']}: {k['why']}, {k['v_mph']} mph, {gap_txt}, planner min {k['min_a_3s']} m/s2 in the 3 s before "
             + f"({k['source']})")
 
+  # run-ups: engaged behind a lead, accelerating (request over RUNUP_A) and then braking (under -0.5) within RUNUP_S of the
+  # end of that acceleration, with the same lead (no distance jump of 4 m or more between ticks: a cut-in is not a run-up)
+  runups = []
+  for i0, i1 in episodes(eng & l_ok & (a_tgt > RUNUP_A), t):
+    j1 = int(np.searchsorted(t, t[i1] + RUNUP_S))
+    brk = np.flatnonzero(eng[i1:j1] & l_ok[i1:j1] & (a_tgt[i1:j1] < -0.5))
+    if len(brk) == 0:
+      continue
+    k = i1 + int(brk[0])
+    if not l_ok[i0:k + 1].all() or (np.abs(np.diff(d_rel[i0:k + 1])) >= 4.0).any():
+      continue
+    runups.append(dict(at=when(i0), v_mph=round(float(v[i1] * MPH), 1), peak_a=round(float(a_tgt[i0:i1 + 1].max()), 2),
+                       gap_s=round(float(gap[i1]), 2), target_s=round(float(tf[i1]), 2), closing_ms=round(float(-v_rel[i1]), 1),
+                       brake_after_s=round(float(t[k] - t[i1]), 1), min_a=round(float(a_tgt[k:j1].min()), 2)))
+  print(f"  run-ups (accelerating behind a lead, then braking under -0.5 within {RUNUP_S:.0f} s): {len(runups)}")
+  for r in runups[:8]:
+    print(f"    at {r['at']}: {r['v_mph']} mph, accel up to {r['peak_a']}, then braking {r['brake_after_s']} s later to {r['min_a']} m/s2; "
+          + f"gap {r['gap_s']} s (target {r['target_s']}), closing {r['closing_ms']} m/s when the accel ended")
+
   # overspeed braking: engaged, no lead limiting, over the target speed, planner asks for braking
   over = v - v_tgt
   base = eng & (src == 0) & ~stop & (over > OVER_V) & (a_tgt < OVER_A)
@@ -337,7 +358,7 @@ def main():
   with open(a.out, "w") as f:
     json.dump(dict(routes=sorted(routes), code=sorted(set().union(*(r['code'] for r in by_route.values()))),
                    pr8_line={k: r['pr8'] for k, r in by_route.items()}, engaged_s=float(dt[eng].sum()),
-                   overspeed_s=float(dt[glideable].sum()), curve_s=float(dt[curve].sum()), episodes=eps, takeovers=takeovers,
+                   overspeed_s=float(dt[glideable].sum()), curve_s=float(dt[curve].sum()), episodes=eps, takeovers=takeovers, runups=runups,
                    fcw=[when_t(x) for x in events['fcw']], alerts=[(when_t(x), a_name) for x, a_name in events['alerts']],
                    glide_errors=[(when_t(x), msg) for x, msg in events['glide_fail']]), f, indent=1)
   print(f"\nwritten: {a.out}")
