@@ -8,6 +8,12 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.widgets import DialogResult
 from openpilot.selfdrive.ui.ui_state import ui_state
+import time
+
+try:
+  from openpilot.selfdrive.controls.lib.camry_personalized import read_settings as _read_personalized
+except Exception:  # the settings page must come up even if the Personalized module is broken
+  _read_personalized = None
 
 if gui_app.sunnypilot_ui():
   from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp as toggle_item
@@ -25,7 +31,8 @@ DESCRIPTIONS = {
   "LongitudinalPersonality": tr_noop(
     "Standard is recommended. In aggressive mode, sunnypilot will follow lead cars closer and be more aggressive with the gas and brake. " +
     "In relaxed mode sunnypilot will stay further away from lead cars. On supported cars, you can cycle through these personalities with " +
-    "your steering wheel distance button."
+    "your steering wheel distance button. With the Personalized profile on (Settings > Personalized) the first position is " +
+    "your own gap table instead of Aggressive."
   ),
   "IsLdwEnabled": tr_noop(
     "Receive alerts to steer back into the lane when your vehicle drifts over a detected lane line " +
@@ -36,6 +43,26 @@ DESCRIPTIONS = {
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
 }
+
+
+class AggressiveSlotName:
+  """Name of the first personality: "Personalized" while the Personalized profile (Settings > Personalized) owns the
+  Aggressive slot, else "Aggressive". The settings file is re-read at most once a second (the label renders every frame),
+  so the name follows the Personalized toggle without a restart."""
+
+  def __init__(self):
+    self._checked = 0.0
+    self._personalized = _read_personalized is not None
+
+  def __call__(self) -> str:
+    now = time.monotonic()
+    if _read_personalized is not None and now - self._checked > 1.0:
+      self._checked = now
+      try:
+        self._personalized = bool(_read_personalized().personalized)
+      except Exception:
+        pass
+    return tr("Personalized") if self._personalized else tr("Aggressive")
 
 
 class TogglesLayout(Widget):
@@ -99,7 +126,7 @@ class TogglesLayout(Widget):
     self._long_personality_setting = multiple_button_item(
       lambda: tr("Driving Personality"),
       lambda: tr(DESCRIPTIONS["LongitudinalPersonality"]),
-      buttons=[lambda: tr("Aggressive"), lambda: tr("Standard"), lambda: tr("Relaxed")],
+      buttons=[AggressiveSlotName(), lambda: tr("Standard"), lambda: tr("Relaxed")],
       button_width=300,
       callback=self._set_longitudinal_personality,
       selected_index=self._params.get("LongitudinalPersonality", return_default=True),

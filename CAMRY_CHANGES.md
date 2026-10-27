@@ -75,7 +75,9 @@ Personal sunnypilot branch for one car:
      (Personalized, Standard, Relaxed): on by default, so the speed-based
      gap table from item 4 is what the Aggressive position drives right
      after the update. Its toggle is the way back to stock Aggressive
-     (flat 1.25 s). Standard and Relaxed keep their stock gaps.
+     (flat 1.25 s). Standard and Relaxed keep their stock gaps. Settings >
+     Toggles > Driving Personality names the first position "Personalized"
+     while the profile is on (it follows the wheel's distance button as before).
    - **Glide** (own toggle, on by default, in every distance mode): behind
      a lead in the same lane, small braking requests are raised to the
      car's coast decel while the gap is a little under the current mode's
