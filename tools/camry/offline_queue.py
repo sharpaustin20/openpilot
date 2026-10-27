@@ -15,6 +15,7 @@ works through the jobs:
   - car battery under MIN_VOLTAGE_MV (in the car): the running job is stopped and the queue ends
   - device over STOP_TEMP_C: the running job is stopped, the queue waits until it is under RESUME_TEMP_C, redoes it once
   - DEADLINE_S after start the queue ends wherever it is
+--only NAME ... runs just those jobs (numbered as in the full list), e.g. one added after a queue was started.
 Each job's output goes to OUT/NN_name.txt, and OUT/queue.log has one line per start/finish/stop.
 """
 import argparse
@@ -140,8 +141,10 @@ class Queue:
     from dataclasses import replace
     cur = cp.PersonalizedSettings()
     cur_path, fall_path = os.path.join(a.stage, "settings_defaults.json"), os.path.join(a.stage, "settings_fallback_125.json")
+    fall145_path = os.path.join(a.stage, "settings_fallback_145.json")
     cp.write_settings(cur, cur_path)
     cp.write_settings(replace(cur, follow_s=(1.1, 1.1, 1.25)), fall_path)
+    cp.write_settings(replace(cur, follow_s=(1.1, 1.1, 1.45)), fall145_path)
     hist = os.path.join(a.out, "learned_copy.json")
     try:
       with open(os.path.join(os.path.dirname(cp.suggested_path()), "camry_long_learned.json")) as f:
@@ -158,10 +161,13 @@ class Queue:
     yield "learner_dry_run", [py, os.path.join(tools, "suggest_long.py"), profile, "--settings", cur_path,
                               "--out", os.path.join(a.out, "suggested_dry_run.json"), "--history", hist], env
     yield "gate_fallback_1p25", [py, os.path.join(tools, "follow_bench.py"), "--gate", cur_path, fall_path, "--modes", "all"], env
+    yield "gate_fallback_1p45", [py, os.path.join(tools, "follow_bench.py"), "--gate", cur_path, fall145_path, "--modes", "all"], env
 
   def run(self) -> int:
     self.log(f"queue running as test job pid {os.getpid()}, tree {self.a.tree}")
     for n, (name, cmd, env) in enumerate(self.jobs(), 1):
+      if self.a.only and name not in self.a.only:
+        continue
       for attempt in range(3):
         why = self.wait_ready()
         if why:
@@ -182,6 +188,7 @@ def main():
   ap.add_argument("--tree", required=True, help="overlay root (OUT/openpilot from overlay.py); its test_job.py wraps the queue")
   ap.add_argument("--stage", required=True, help="scratch folder under /tmp with drive_review.py / scc_check.py")
   ap.add_argument("--out", required=True, help="result folder")
+  ap.add_argument("--only", nargs="*", default=[], help="run only these jobs (by name), e.g. after a queue already ran")
   ap.add_argument("--run", action="store_true", help=argparse.SUPPRESS)
   a = ap.parse_args()
   if not os.path.realpath(a.stage).startswith("/tmp/"):
@@ -200,7 +207,7 @@ def main():
       continue
     env = dict({k: v for k, v in os.environ.items() if k != "OPENPILOT_PREFIX"}, PYTHONPATH=a.tree, PYTHONDONTWRITEBYTECODE="1")
     rc = subprocess.call([sys.executable, wrapper, sys.executable, os.path.abspath(__file__), "--run",
-                          "--tree", a.tree, "--stage", a.stage, "--out", a.out], env=env, cwd=a.tree)
+                          "--tree", a.tree, "--stage", a.stage, "--out", a.out, "--only", *a.only], env=env, cwd=a.tree)
     if rc != BUSY_EXIT:
       return
     time.sleep(60)
