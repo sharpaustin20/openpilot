@@ -75,13 +75,16 @@ def segments(root, routes):
 
 
 def read_segment(path):
-  """One segment -> (git, branch, personalized log line, ticks at longitudinalPlan rate)."""
+  """One segment -> (git, branch, personalized log line, ticks at longitudinalPlan rate, events: FCW onsets, alert onsets,
+  glide failures)."""
   if onroad():
     return None
   from openpilot.tools.lib.logreader import LogReader
   git = branch = pers = None
   cs = cc = sp = rs = ss = ctl = None
   ticks = []
+  ev = dict(fcw=[], alerts=[], glide_fail=[])
+  fcw_prev, alert_prev = False, ""
   for m in LogReader(path):
     w = m.which()
     if w == "carState":
@@ -90,6 +93,9 @@ def read_segment(path):
       if cs is None or ctl is None:
         continue
       lp = m.longitudinalPlan
+      if lp.fcw and not fcw_prev:
+        ev["fcw"].append(m.logMonoTime * 1e-9)
+      fcw_prev = bool(lp.fcw)
       pitch = float(cc.orientationNED[1]) if cc is not None and len(cc.orientationNED) == 3 else 0.0
       lead = rs.leadOne if rs is not None else None
       ticks.append((m.logMonoTime * 1e-9, cs.vEgo, cs.vCruise / 3.6, ctl.longControlState.raw != 0, cs.gasPressed, cs.brakePressed,
@@ -112,11 +118,17 @@ def read_segment(path):
       rs = m.radarState
     elif w == "selfdriveState":
       ss = m.selfdriveState
+      alert = ss.alertType if ss.alertStatus.raw != 0 else ""
+      if alert and alert != alert_prev:
+        ev["alerts"].append((m.logMonoTime * 1e-9, alert.split("/")[0]))
+      alert_prev = alert
     elif w == "initData":
       git, branch = m.initData.gitCommit[:7], m.initData.gitBranch
     elif w == "logMessage" and pers is None and "camry personalized" in m.logMessage:
       pers = m.logMessage[:400]
-  return git, branch, pers, ticks
+    if w in ("logMessage", "errorLogMessage") and "glide off for this drive" in getattr(m, w):
+      ev["glide_fail"].append((m.logMonoTime * 1e-9, getattr(m, w)[:300]))
+  return git, branch, pers, ticks, ev
 
 
 def t_follow(personality, v, table):
@@ -172,20 +184,27 @@ def main():
 
   # per route: time runs from the route's first tick; routes are laid end to end (a reboot resets the log clock)
   by_route = {}
-  for (route, _, _), (git, branch, p, ticks) in zip(segs, results, strict=True):
-    r = by_route.setdefault(route, dict(code=set(), pr8=None, rows=[]))
+  for (route, _, _), (git, branch, p, ticks, ev) in zip(segs, results, strict=True):
+    r = by_route.setdefault(route, dict(code=set(), pr8=None, rows=[], fcw=[], alerts=[], glide_fail=[]))
+    for k in ("fcw", "alerts", "glide_fail"):
+      r[k] += ev[k]
     if git:
       r["code"].add(f"{git} ({branch})")
     r["pr8"] = r["pr8"] or p
     r["rows"] += ticks
   print("\n== install")
   blocks, spans, offset = [], [], 0.0
+  events = dict(fcw=[], alerts=[], glide_fail=[])
   for n, (route, r) in enumerate(sorted(by_route.items()), 1):
     line = "YES: " + r["pr8"][:120] if r["pr8"] else "NOT found (PR #8 was not running on this route)"
     print(f"  route {n} {route}: code {', '.join(sorted(r['code'])) or 'unknown'}; PR #8 planner line: {line}")
     if r["rows"]:
       B = np.array(r["rows"], dtype=float)
-      B[:, 0] += offset - B[0, 0]
+      shift = offset - B[0, 0]
+      B[:, 0] += shift
+      events["fcw"] += [x + shift for x in r["fcw"]]
+      events["alerts"] += [(x + shift, a) for x, a in r["alerts"]]
+      events["glide_fail"] += [(x + shift, msg) for x, msg in r["glide_fail"]]
       spans.append((n, offset, B[-1, 0]))
       table = personalized_table(r["pr8"])
       tf = [[t_follow(int(p), v, table)] for p, v in zip(B[:, 17], B[:, 1], strict=True)]   # the route's own target gaps
@@ -212,6 +231,20 @@ def main():
 
   by_pers = ", ".join(f"{n} {mmss(dt[eng & (pers_raw == k)].sum())}" for k, n in ((0, 'personalized/aggressive'), (1, 'standard'), (2, 'relaxed')))
   print(f"\n== drive: {mmss(dt.sum())} total, engaged {mmss(dt[eng].sum())}, {(dt[eng] * v[eng]).sum() / 1609:.1f} mi engaged; {by_pers}")
+
+  def when_t(x):
+    return when(min(int(np.searchsorted(t, x)), len(t) - 1))
+
+  # health: forward collision warnings, alerts shown, glide switching itself off after an error
+  print(f"\n== health: FCW {len(events['fcw'])}" + (f" (at {', '.join(when_t(x) for x in events['fcw'][:6])})" if events["fcw"] else "")
+        + f"; glide errors {len(events['glide_fail'])}")
+  for x, msg in events["glide_fail"][:3]:
+    print(f"  glide error at {when_t(x)}: {msg}")
+  counts = {}
+  for _, a_name in events["alerts"]:
+    counts[a_name] = counts.get(a_name, 0) + 1
+  if counts:
+    print("  alerts shown: " + ", ".join(f"{k} {n}" for k, n in sorted(counts.items(), key=lambda kv: -kv[1])[:12]))
 
   # following
   fol = eng & (src == 1) & l_ok & (v > 2.0)
@@ -304,7 +337,9 @@ def main():
   with open(a.out, "w") as f:
     json.dump(dict(routes=sorted(routes), code=sorted(set().union(*(r['code'] for r in by_route.values()))),
                    pr8_line={k: r['pr8'] for k, r in by_route.items()}, engaged_s=float(dt[eng].sum()),
-                   overspeed_s=float(dt[glideable].sum()), curve_s=float(dt[curve].sum()), episodes=eps, takeovers=takeovers), f, indent=1)
+                   overspeed_s=float(dt[glideable].sum()), curve_s=float(dt[curve].sum()), episodes=eps, takeovers=takeovers,
+                   fcw=[when_t(x) for x in events['fcw']], alerts=[(when_t(x), a_name) for x, a_name in events['alerts']],
+                   glide_errors=[(when_t(x), msg) for x, msg in events['glide_fail']]), f, indent=1)
   print(f"\nwritten: {a.out}")
 
 
