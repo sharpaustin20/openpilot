@@ -13,6 +13,11 @@ the cores to come online, then execs the command (same PID, so stdin/stdout pass
 hardwared treats the job as running only while that exact process is alive, so a crashed
 or killed job, or a stale marker after a reboot, is ignored.
 
+One test job at a time: the wrapper holds a lock (marker path + ".lock") for the life of
+the job and exits with BUSY_EXIT, without touching the marker, while another test job is
+running. Without it, two jobs started in the same second (an SSH job and the parked
+learner) both wrote the marker, and the survivor ran unmarked once the other ended.
+
 Standalone (no openpilot imports) so it runs over SSH without PYTHONPATH.
 """
 import os
@@ -21,6 +26,7 @@ import time
 
 CPU_ONLINE_PATH = "/sys/devices/system/cpu/online"
 WAIT_FOR_CORES_S = 3.0
+BUSY_EXIT = 75   # EX_TEMPFAIL: another test job is running, try again when it has finished
 
 
 def test_job_path() -> str:
@@ -73,11 +79,41 @@ def _wait_for_cores(timeout: float = WAIT_FOR_CORES_S) -> None:
     time.sleep(0.1)
 
 
-def main(argv: list[str]) -> None:
+def _lock(path: str) -> int | None:
+  """Exclusive lock for the life of the job (the fd survives exec), or None while another job holds it."""
+  import fcntl
+  os.makedirs(os.path.dirname(path), exist_ok=True)
+  fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o644)
+  try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except OSError:
+    os.close(fd)
+    return None
+  os.set_inheritable(fd, True)
+  return fd
+
+
+def _running_job(path: str) -> str:
+  try:
+    with open(path) as f:
+      return f.read(64).split()[0]
+  except Exception:
+    return "?"
+
+
+def main(argv: list[str], path: str | None = None) -> None:
   if not argv:
     print(__doc__, file=sys.stderr)
     sys.exit(2)
-  mark_test_job()
+  path = path or test_job_path()
+  # the lock makes the check and the marker one step; test_job_active() also catches a job started by an older
+  # wrapper without the lock
+  fd = _lock(path)
+  if fd is None or test_job_active(path):
+    msg = f"test_job: another test job is running (pid {_running_job(path)}); one comma job at a time, try again when it has finished"
+    print(msg, file=sys.stderr)
+    sys.exit(BUSY_EXIT)
+  mark_test_job(path)
   _wait_for_cores()
   os.execvp(argv[0], argv)
 

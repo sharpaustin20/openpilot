@@ -29,13 +29,15 @@ NUMBER_OPTIONS = {
   "light_brake": ([round(-1.5 + 0.1 * i, 1) for i in range(11)], lambda v: f"{v:.1f} m/s²"),
   "min_ttc_s": ([float(i) for i in range(5, 11)], lambda v: f"{v:.0f} s"),
   "coast_accel": ([round(-0.6 + 0.1 * i, 1) for i in range(6)], lambda v: f"{v:.1f} m/s²"),
+  "overspeed_glide_mph": ([float(i) for i in range(11)], lambda v: "off" if v == 0 else f"{v:.0f} mph"),
+  "approach_decel": ([round(0.3 + 0.1 * i, 1) for i in range(8)], lambda v: f"{v:.1f} m/s²"),
   "soft_distance_factor": ([round(0.1 * i, 1) for i in range(1, 11)], lambda v: f"{v:.1f}"),
 }
 
 FIELD_NAMES = {
   "follow_s": "follow gap", "coast_margin_s": "coast zone starts", "light_width_s": "light-brake zone width",
   "light_brake": "light braking limit", "min_ttc_s": "glide only above TTC", "coast_accel": "coast decel",
-  "soft_distance_factor": "soft plan strength",
+  "soft_distance_factor": "soft plan strength", "overspeed_glide_mph": "glide over set speed", "approach_decel": "closing-in decel",
 }
 
 
@@ -149,11 +151,16 @@ class PersonalizedLayout(Widget):
     for field, title, desc in (
       ("personalized", "Personalized Profile",
        "Your gap table in the Aggressive position of the distance button: Personalized, Standard, Relaxed. On by default; " +
-       "off = stock Aggressive (flat 1.25 s gap). Changes here apply at the next drive; only switching Glide or Soft Plan off applies right away."),
+       "off = stock Aggressive (flat 1.25 s gap). Changes here apply at the next drive; only switching Glide, Soft Plan or Ease Into The Gap " +
+       "off applies right away."),
       ("glide", "Glide",
        "In every distance mode: behind a lead, coast instead of braking while the gap is in the coast zone under that mode's target, " +
        "brake lightly in the zone below it, and brake normally below that. Off when closing fast, when the lead brakes hard, " +
        "right after a cut-in, or below 11 mph. Only ever asks for less braking; forward collision warning is unchanged."),
+      ("approach", "Ease Into The Gap",
+       "Closing on a slower car, ease the accelerator off early instead of running up and braking: acceleration tapers to zero " +
+       "as arriving at the gap would take more of the closing-in decel below. Only ever less acceleration, never below zero; " +
+       "braking is untouched. Off below 11 mph."),
       ("soft_plan", "Soft Plan",
        "The planner itself cares less about holding the exact distance while in the glide band, so it plans the glide " +
        "instead of braking to win the gap back. The too-close penalty is unchanged. On by default; the learner tunes its " +
@@ -178,6 +185,14 @@ class PersonalizedLayout(Widget):
       self._number("light_brake", "Light Braking Limit", "Strongest braking asked for in the light-brake zone."),
       self._number("coast_accel", "Coast Decel", "What to ask for while coasting. -0.3 m/s² is about the Camry's own coast on a flat road."),
       self._number("min_ttc_s", "Glide Only Above TTC", "No glide when time to collision with the lead is under this."),
+      self._number("overspeed_glide_mph", "Glide Over Set Speed",
+                   "Over your set speed or the speed limit target with nothing else limiting the plan (no lead, curve or stop), coast instead of " +
+                   "braking while within this many mph over. Past that, braking ramps in gradually over 5 mph and never goes beyond -1.0 m/s². " +
+                   "Off with the Glide toggle. Applies at the next drive."),
+      self._toggles["approach"],
+      self._number("approach_decel", "Closing-In Decel",
+                   "How firmly to close in: the planned decel for arriving at the gap. Lower lifts off earlier and glides in longer; " +
+                   "higher closes in quicker."),
       self._toggles["soft_plan"],
       self._number("soft_distance_factor", "Soft Plan Strength", "Weight on holding the exact distance while in the glide band. 1.0 = stock, lower = softer."),
       text_item(lambda: tr("Live"), self._live_text),

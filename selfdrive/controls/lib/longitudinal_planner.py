@@ -3,6 +3,7 @@ import math
 import numpy as np
 
 import cereal.messaging as messaging
+from cereal import custom
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -18,6 +19,8 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+
+PlanSourceSP = custom.LongitudinalPlanSP.LongitudinalPlanSource
 
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
@@ -195,9 +198,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 
-    # Camry Personalized glide: coast instead of braking to hold the exact gap (only ever less braking)
+    # Camry Personalized glide: ease off while closing on a lead (approach taper, only ever less acceleration) and coast
+    # instead of braking to hold the exact gap (only ever less braking)
     if not self.output_should_stop:
       output_a_target = self.glide.apply(output_a_target, self.mpc.source == LongitudinalPlanSource.lead0, ACCEL_MIN)
+      # Camry glide over set speed: nothing but the set speed or the speed limit target limits the plan (no lead, curve,
+      # stop or e2e request), so braking is only to get back down to it: coast within the allowance, linearly firmer
+      # past it, capped. accel_coast is the car's own coast on this grade.
+      speed_is_the_reason = (self.mpc.source == LongitudinalPlanSource.cruise and not reset_state and not force_slow_decel
+                             and self.source in (PlanSourceSP.cruise, PlanSourceSP.speedLimitAssist))
+      output_a_target = self.glide.apply_overspeed(output_a_target, v_ego, v_cruise, accel_coast, speed_is_the_reason)
     self.glide.write_state()
 
     for idx in range(2):

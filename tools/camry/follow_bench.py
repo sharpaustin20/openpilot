@@ -10,7 +10,9 @@
 #          --quick        only the glide-relevant scenarios
 #          --gate CURRENT CANDIDATE [--modes all]   full bench of two settings files, PASS/FAIL for the candidate
 #                                                   (used by suggest_long.py; --modes all adds Standard and Relaxed)
-import os, sys
+import os
+import sys
+from dataclasses import replace
 os.environ.setdefault("OPENPILOT_PREFIX", "lbench")   # isolate params/msgq namespace from the real system
 
 try:
@@ -37,15 +39,19 @@ TUNES = {
   "stock 1.25":     ([0], [1.25]),
   "PR7 1.0":        ([40, 60], [1.0, 1.45]),
   "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
+  "flat 1.1":       ([0], [1.1]),
 }
 # settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have both on)
-OFF = cp.PersonalizedSettings(glide=False, soft_plan=False)
+OFF = cp.PersonalizedSettings(glide=False, soft_plan=False, approach=False, overspeed_glide_mph=0.0)   # the plain planner
 GLIDE = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=False)
 SOFT = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=True)
 DEFAULTS = cp.PersonalizedSettings()   # what the car runs after the update with no settings file
+PR8 = replace(SOFT, overspeed_glide_mph=0.0, approach=False)   # glide + soft plan as PR #8 behaves (no overspeed glide, no approach taper)
 SETTINGS = {
-  "0.8 + glide":    (TUNES["0.8 to 35"], GLIDE),
-  "0.8 + glide+soft": (TUNES["0.8 to 35"], SOFT),
+  "0.8 + glide":    (TUNES["0.8 to 35"], replace(GLIDE, overspeed_glide_mph=0.0, approach=False)),
+  "0.8 + glide+soft": (TUNES["0.8 to 35"], PR8),
+  "0.8 + all":      (TUNES["0.8 to 35"], DEFAULTS),   # PR #8 plus glide over set speed and the approach taper (the defaults)
+  "1.1 + all":      (TUNES["flat 1.1"], DEFAULTS),
   "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
   "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
@@ -57,7 +63,8 @@ TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
 # GLIDE CHECK: each glide tune against the same gaps without glide
-BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "standard + defaults": "standard",
+BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft", "1.1 + all": "flat 1.1",
+           "standard + defaults": "standard",
            "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
 CUR_PERSONALITY = [AGG]
@@ -278,6 +285,88 @@ def cut_in(v_ego_mph, d_cut, dv):
   return dict(min_gap_m=a[:, 0].min(), min_a=a[:, 2].min(), fcw=fcw, crash=bool(a[:, 0].min() < 0.4))
 
 
+# ---- overspeed glide: ego over the set speed with nothing else limiting the plan ----
+def run_overspeed(v0_mph, cruise_profile, duration, pitch=0.0, lead=None):
+  """cruise_profile(t) -> set speed (m/s); lead = (distance m, speed m/s) of a slower lead far ahead, else none.
+  Metrics: braking time, hardest decel, seconds over the set speed, when it got back to it, glide time; with a lead
+  also the min gap and TTC as in run()."""
+  v0 = v0_mph * MPH
+  p = make_plant(v0, 200.0 if lead is None else lead[0], False)
+  p.lead_relevancy = lead is not None
+  vl = v0 if lead is None else lead[1]
+  p.v_lead_prev = vl
+  rows, fcw, glide_s = [], 0, 0.0
+  while p.current_time < duration:
+    vc = float(cruise_profile(p.current_time))
+    out = p.step(vl, 1.0 if lead is not None else 0.0, vc, pitch, 1.0)
+    rows.append((out["speed"], out["acceleration"], vc, out["distance_lead"] - out["distance"]))
+    fcw += bool(out["fcw"])
+    glide_s += DT * bool(getattr(getattr(p.planner, "glide", None), "active", False))
+  v, acc, vc, d = np.array(rows).T
+  over = v - vc
+  back = np.flatnonzero(over <= 0.5 * MPH)
+  res = dict(min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(lead is not None and d.min() < 0.4),
+             brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, over_s=float((over > 0.5 * MPH).sum() * DT),
+             max_over_mph=float(over.max() / MPH), back_s=float(back[0] * DT) if len(back) else None, pitch=pitch)
+  if lead is not None:
+    closing = vl - v
+    ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
+    res.update(min_gap_m=float(d.min()), min_gap_s=float(d.min() / max(v.max(), 0.1)), min_ttc=float(ttc.min()))
+  return res
+
+
+def overspeed_scenarios():
+  """(title, v0 mph, cruise_profile, duration, pitch rad, lead). Titles start with 'over set speed' (flat/hill) or 'set speed'."""
+  S = []
+  for mph, over in ((30, 3), (45, 2), (45, 4), (60, 4), (55, 10)):
+    S.append((f"over set speed by {over} mph at {mph} mph", mph + over, lambda t, v=mph * MPH: v, 30.0, 0.0, None))
+  S.append(("set speed drops 55->35 mph after 5 s", 55, lambda t: (55.0 if t < 5.0 else 35.0) * MPH, 40.0, 0.0, None))
+  S.append(("over set speed by 3 mph at 45 mph, 3 deg downhill", 48, lambda t: 45 * MPH, 30.0, -0.052, None))
+  S.append(("over set speed by 3 mph at 45 mph, 3 deg uphill", 48, lambda t: 45 * MPH, 30.0, 0.052, None))
+  S.append(("over set speed by 3 mph at 45 mph, slower lead 70 m ahead at 40 mph", 48, lambda t: 45 * MPH, 40.0, 0.0, (70.0, 40 * MPH)))
+  S.append(("over set speed by 5 mph at 60 mph, slower lead 90 m ahead at 50 mph", 65, lambda t: 60 * MPH, 40.0, 0.0, (90.0, 50 * MPH)))
+  return S
+
+
+OVERSPEED = overspeed_scenarios()
+OVERSPEED_TITLES = [t for t, *_ in OVERSPEED]
+
+
+# ---- approach: ego well behind a slower lead and faster than it, set speed higher still (the run-up case) ----
+def run_approach(v_ego_mph, v_lead_mph, d0, cruise_mph, duration=60.0):
+  """Closes in from d0 m. Metrics: peak accel, peak jerk, braking time, hardest decel, how far under the target gap it
+  got (overshoot), min gap and TTC, FCW, crash, when the gap settled within 15% of the target, glide time."""
+  v0, vl = v_ego_mph * MPH, v_lead_mph * MPH
+  p = make_plant(v0, d0, False)
+  p.v_lead_prev = vl
+  rows, fcw, glide_s = [], 0, 0.0
+  while p.current_time < duration:
+    out = p.step(vl, 1.0, cruise_mph * MPH, 0.0, 1.0)
+    rows.append((out["distance_lead"] - out["distance"], out["speed"], out["acceleration"]))
+    fcw += bool(out["fcw"])
+    glide_s += DT * bool(getattr(getattr(p.planner, "glide", None), "active", False))
+  d, v, acc = np.array(rows).T
+  expect = long_mpc.get_T_FOLLOW(CUR_PERSONALITY[0], vl) * vl + long_mpc.STOP_DISTANCE   # target gap at the lead's speed
+  closing = vl - v
+  ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
+  outside = np.flatnonzero(np.abs(d - expect) > 0.15 * expect + 1)
+  under = max(0.0, expect - d.min())
+  return dict(min_gap_m=d.min(), min_gap_s=d.min() / max(v.max(), 0.1), expect_m=expect, under_m=under, under_s=under / max(vl, 0.1),
+              peak_a=acc.max(), min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, brake_s=float((acc < BRAKE_A).sum() * DT),
+              fcw=fcw, crash=bool(d.min() < 0.4), min_ttc=ttc.min(), glide_s=glide_s,
+              settle_s=float((outside[-1] + 1) * DT) if len(outside) else 0.0)
+
+
+# (title, ego mph, lead mph, start gap m, set speed mph)
+APPROACH = [
+  ("approach: lead 30 mph, from 40 mph with 45 set, 120 m back", 40, 30, 120.0, 45),
+  ("approach: lead 50 mph, from 60 mph with 70 set, 150 m back", 60, 50, 150.0, 70),
+  ("approach: lead 45 mph, from 45 mph with 60 set, 100 m back", 45, 45, 100.0, 60),
+  ("approach: lead 20 mph, from 30 mph with 35 set, 80 m back", 30, 20, 80.0, 35),
+]
+APPROACH_TITLES = [t for t, *_ in APPROACH]
+
+
 def job(args):
   name, idx = args
   bp, vals = TUNES[name]
@@ -287,8 +376,15 @@ def job(args):
   if idx < len(sc):
     title, prof, v0, d0, dur = sc[idx]
     return name, title, run(prof, v0, d0, dur)
-  mph, dcut, dv = CUT_INS[idx - len(sc)]
-  return name, f"cut-in {dcut} m ahead, {dv} m/s slower at {mph} mph", cut_in(mph, dcut, dv)
+  if idx < len(sc) + len(CUT_INS):
+    mph, dcut, dv = CUT_INS[idx - len(sc)]
+    return name, f"cut-in {dcut} m ahead, {dv} m/s slower at {mph} mph", cut_in(mph, dcut, dv)
+  k = idx - len(sc) - len(CUT_INS)
+  if k < len(OVERSPEED):
+    title, v0, prof, dur, pitch, ld = OVERSPEED[k]
+    return name, title, run_overspeed(v0, prof, dur, pitch, ld)
+  title, ve, vl, d0, vc = APPROACH[k - len(OVERSPEED)]
+  return name, title, run_approach(ve, vl, d0, vc)
 
 
 CUT_INS = ((40, 15, 3), (60, 25, 4), (45, 28, 1), (45, 20, 2))   # the last two: ~1.1 s and ~0.7 s gaps at 45 mph
@@ -298,7 +394,7 @@ GLIDE_ONLY = [t for t, *_ in glide_scenarios()]
 def job_list(names, quick):
   """(tune, scenario index) pairs; quick = steady, glide and cut-in scenarios only."""
   sc = scenarios()
-  n_jobs = len(sc) + len(CUT_INS)
+  n_jobs = len(sc) + len(CUT_INS) + len(OVERSPEED) + len(APPROACH)
   return [(name, i) for name in names for i in range(n_jobs)
           if not quick or i >= len(sc) or sc[i][0] in GLIDE_ONLY or sc[i][0].startswith("steady")]
 
@@ -306,7 +402,7 @@ def job_list(names, quick):
 def run_jobs(jobs, names):
   from multiprocessing import Pool
   res = {name: {} for name in names}
-  order = [t for t, *_ in scenarios()] + [f"cut-in {d} m ahead, {dv} m/s slower at {m} mph" for m, d, dv in CUT_INS]
+  order = [t for t, *_ in scenarios()] + [f"cut-in {d} m ahead, {dv} m/s slower at {m} mph" for m, d, dv in CUT_INS] + OVERSPEED_TITLES + APPROACH_TITLES
   print(f"{len(jobs)} runs on {os.cpu_count()} cores", flush=True)
   with Pool(os.cpu_count(), maxtasksperchild=1) as pool:   # fresh process per job: no patches leak between jobs
     for k, (name, title, m) in enumerate(pool.imap_unordered(job, jobs), 1):
@@ -353,6 +449,8 @@ def gate(cur_path, cand_path, modes=("personalized",)):
         worse.append(f"{mode}, {k}: min gap {m['min_gap_s']:.2f} s")
       if k.startswith("steady") and abs(m["gap_m"] - m["expect_m"]) > 0.15 * m["expect_m"] + 1:
         worse.append(f"{mode}, {k}: steady gap {m['gap_m']:.0f} m, table {m['expect_m']:.0f} m")
+      if k in OVERSPEED_TITLES and m.get("pitch", 0.0) == 0.0 and m.get("back_s") is None and b.get("back_s") is not None:
+        worse.append(f"{mode}, {k}: never got back to the set speed")
     for which, r in (("current", cur), ("candidate", cand)):
       tot[f"{which}/{mode}"] = dict(fcw=sum(m["fcw"] for m in r.values()), crashes=sum(m["crash"] for m in r.values()),
                                     brake_s=round(sum(m.get("brake_s", 0.0) for m in r.values()), 1),
@@ -377,7 +475,7 @@ def main():
   print(f"FIDELITY CHECK: {'OK' if sane else 'FAILED (do not trust results)'}" + (f" steady-gap mismatches: {bad}" if bad else ""))
   print("\nevents (min gap m, min TTC s, hardest decel m/s2, FCW frames, crash):")
   for k in res[names[0]]:
-    if k.startswith("steady"):
+    if k.startswith("steady") or k in OVERSPEED_TITLES or k in APPROACH_TITLES:
       continue
     print(f"  {k}")
     for n in names:
@@ -389,7 +487,7 @@ def main():
   print("\nsummary: " + " | ".join(f"{n}: hardest {w['min_a']:.2f}, FCW frames {w['fcw']}, crashes {w['crashes']}" for n, w in worst.items()))
 
   # glide: braking time and gap behind the same lead, glide profiles vs their table without glide
-  print("\nglide scenarios (seconds braking harder than %.1f m/s2 / seconds gliding / gap at end s / min gap s):" % BRAKE_A)
+  print(f"\nglide scenarios (seconds braking harder than {BRAKE_A:.1f} m/s2 / seconds gliding / gap at end s / min gap s):")
   for k in GLIDE_ONLY:
     if k not in res[names[0]]:
       continue
@@ -398,8 +496,30 @@ def main():
       m = res[n].get(k)
       if m:
         print(f"    {n:16s} brake {m['brake_s']:5.1f} s  glide {m['glide_s']:5.1f} s  end gap {m['end_gap_s']:.2f}  min gap {m['min_gap_s']:.2f}")
+  print(f"\noverspeed scenarios (braking harder than {BRAKE_A:.1f} s / hardest decel / over the set speed s / back at it after s / glide s):")
+  for k in OVERSPEED_TITLES:
+    if k not in res[names[0]]:
+      continue
+    print(f"  {k}")
+    for n in names:
+      m = res[n].get(k)
+      if m:
+        back = f"{m['back_s']:.1f}" if m["back_s"] is not None else "never"
+        extra = f"  min gap {m['min_gap_s']:.2f} s  fcw {m['fcw']}" if "min_gap_s" in m else ""
+        print(f"    {n:16s} brake {m['brake_s']:5.1f} s  decel {m['min_a']:5.2f}  over {m['over_s']:5.1f} s"
+              + f"  back {back:>5s}  glide {m['glide_s']:5.1f} s{extra}")
+  print("\napproach scenarios (peak accel / peak jerk / braking s / hardest decel / under the target gap by s / min gap s / settled after s / fcw):")
+  for k in APPROACH_TITLES:
+    if k not in res[names[0]]:
+      continue
+    print(f"  {k}")
+    for n in names:
+      m = res[n].get(k)
+      if m:
+        print(f"    {n:16s} accel {m['peak_a']:4.2f}  jerk {m['max_jerk']:4.1f}  brake {m['brake_s']:5.1f} s  decel {m['min_a']:5.2f}"
+              + f"  under {m['under_s']:4.2f} s  min gap {m['min_gap_s']:.2f} s  settled {m['settle_s']:5.1f} s  fcw {m['fcw']}")
   print("\nGLIDE CHECK, each glide tune vs the same gaps without glide (no new FCW frames, no new crashes, "
-        "braking no harder than -2.5 where the base stayed above it):")
+        + "braking no harder than -2.5 where the base stayed above it):")
   for n in SETTINGS:
     base = BASE_OF.get(n, names[0])
     if n not in res or base not in res:
@@ -437,11 +557,12 @@ def diag_job(args):
     man = create_maneuvers({"e2e": False, "force_decel": False})[idx]
     if CAR_MODE == "toyota":   # same maneuver, Camry CarParams (or a diag variant)
       use_camry_planner()
-    import contextlib, io
+    import contextlib
+    import io
     with contextlib.redirect_stdout(io.StringIO()):
       valid, out = man.evaluate()
     return mode, man.title, dict(valid=valid, min_gap=float(out[:, 6].min()))
-  stock = set_tune(*TUNES["stock 1.25"])
+  set_tune(*TUNES["stock 1.25"])
   v = 45 * MPH
   return mode, "lead brakes 2.0 from 45 mph (stock)", run(lambda t: max(0.0, v - 2.0 * t), v, None, 25.0)
 

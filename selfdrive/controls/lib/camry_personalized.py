@@ -15,6 +15,15 @@ learning job's suggestions:
 - soft plan (option C1, on by default): while glide may act, the MPC's weight on holding the exact
   distance is lowered, so the plan itself glides. Its one-sided danger-zone penalty is unchanged. The
   learning job tunes the strength (firmer after brake takeovers inside the band, softer without them).
+- glide over set speed (overspeed_glide_mph, default 3, 0 = off): with nothing else limiting the plan (no lead,
+  curve, stop or e2e request), braking only to get back down to the set speed or the speed limit target is lifted
+  to the car's own coast on that grade while within the allowance, then ramps in linearly over OVERSPEED_RAMP_MPH
+  and is capped at OVERSPEED_BRAKE: speed alone never brings hard braking. Never a throttle request.
+- approach (on by default): closing on a slower lead, the acceleration request is tapered off once coasting plus light
+  braking at approach_decel would be needed to arrive at the lead's speed right at the target gap (closing^2 / 2 x the
+  distance left), down to no acceleration at all, so the car stops gaining speed early and eases into the gap instead
+  of running up and braking. It only ever lowers a positive acceleration request, never below zero; braking requests
+  are untouched. The closing speed feeding it is filtered (1 s): it is a noisy estimate on this car.
 FCW is computed by the MPC and is untouched by all of it.
 
 Settings live in a file, not Params: this branch is a prebuilt release, so Params keys are compiled
@@ -52,13 +61,19 @@ CLOSING_MIN = 0.3           # m/s, slower closing than this counts as not closin
 CUT_IN_JUMP = 4.0           # m, a lead distance jump this big in one frame is a different car
 STABLE_TIME = 1.0           # s the same lead must be seen before glide acts
 BLOCK_HOLD_TIME = 1.0       # s glide stays off after a TTC or lead-braking gate trips
+OVERSPEED_RAMP_MPH = 5.0    # mph past the overspeed allowance over which braking for speed alone ramps in, linearly
+OVERSPEED_BRAKE = -1.0      # m/s^2, the most braking ever asked for because of speed alone (moderate, never hard)
+OVERSPEED_COAST_MIN = -0.5  # m/s^2, the overspeed coast floor never asks for more decel than this (uphill)
+APPROACH_START = 0.25       # the taper starts when the decel needed to arrive at the target gap is this fraction of approach_decel
+APPROACH_ACCEL_HI = 1.5     # m/s^2, the acceleration cap where the taper starts (above anything the MPC asks for over 11 mph)
+APPROACH_FILTER_S = 1.0     # s, first-order filter on the closing speed the taper uses (a Kalman estimate from distance here)
 SETTINGS_CHECK_INTERVAL = 1.0  # s
 STATE_WRITE_INTERVAL = 1.0     # s
 
 BAND_RELATIVE = "relative"  # zones measured from the profile's target gap
 BAND_FIXED = "fixed"        # zones at fixed gaps in seconds
 
-BOOLS = ("personalized", "glide", "soft_plan", "learn", "auto_apply")
+BOOLS = ("personalized", "glide", "soft_plan", "approach", "learn", "auto_apply")
 
 
 @dataclass
@@ -75,6 +90,9 @@ class PersonalizedSettings:
   light_brake: float = -0.8       # m/s^2, strongest braking asked for in the light zone
   min_ttc_s: float = 6.0          # s, glide only while time to collision is above this
   coast_accel: float = -0.3       # m/s^2, request while coasting (Camry's own coast on flat road)
+  overspeed_glide_mph: float = 3.0  # coast instead of braking while within this many mph over the set speed or speed limit (0 = off)
+  approach: bool = True           # ease off while closing on a slower lead and coast into the gap (no run-up)
+  approach_decel: float = 0.5     # m/s^2, planned decel for closing in: lift off once arriving at the target gap needs this much
   soft_plan: bool = True
   soft_distance_factor: float = 0.3  # weight on holding the exact distance while in the glide band (1.0 = stock)
   learn: bool = True              # run the learning job while parked (writes suggestions)
@@ -91,6 +109,8 @@ LIMITS = {
   "light_brake": (-1.5, -0.5),
   "min_ttc_s": (5.0, 10.0),
   "coast_accel": (-0.6, -0.1),
+  "overspeed_glide_mph": (0.0, 10.0),
+  "approach_decel": (0.3, 1.0),
   "soft_distance_factor": (0.1, 1.0),
 }
 
@@ -302,6 +322,41 @@ def glide_floor(s: PersonalizedSettings, gap_s: float, t_follow: float, accel_mi
   return None
 
 
+def overspeed_floor(s: PersonalizedSettings, over_ms: float, accel_coast: float) -> float | None:
+  """Least braking allowed for speed alone when over the target by over_ms (m/s), or None to pass the MPC through.
+  accel_coast: the car's own coast accel on the current grade (the planner's estimate). Within the allowance the floor
+  is that coast, never above 0 (no throttle) and never below OVERSPEED_COAST_MIN; past it the floor drops linearly
+  to OVERSPEED_BRAKE over OVERSPEED_RAMP_MPH and stays there: braking for speed alone is never hard."""
+  allow = s.overspeed_glide_mph * MPH
+  if allow <= 0.0 or over_ms <= 0.0:
+    return None
+  coast = min(0.0, max(accel_coast, OVERSPEED_COAST_MIN))
+  if over_ms <= allow:
+    return coast
+  frac = min((over_ms - allow) / (OVERSPEED_RAMP_MPH * MPH), 1.0)
+  return coast + frac * (OVERSPEED_BRAKE - coast)
+
+
+def approach_cap(s: PersonalizedSettings, gap_m: float, closing: float, v_ego: float, t_follow: float) -> float | None:
+  """Most acceleration allowed while closing on a lead (never below 0), or None for no cap. gap_m: distance to the
+  lead; closing: m/s, positive when gaining on it. The decel needed to arrive at the lead's speed right at the target
+  gap (the gap for the lead's speed) is closing^2 / (2 x the distance left to it). Under APPROACH_START of
+  approach_decel there is no cap; from there the cap tapers linearly from APPROACH_ACCEL_HI down to 0 at approach_decel
+  (pedal lifted, no more gaining speed) and stays at 0 beyond it; any slowing down is the MPC's. Inside the target gap
+  the glide zones take over: no cap."""
+  if not s.approach or closing <= CLOSING_MIN:
+    return None
+  room = gap_m - (t_follow * max(v_ego - closing, 0.0) + STOP_DISTANCE)
+  if room <= 0.0:
+    return None
+  frac = closing * closing / (2.0 * room) / max(s.approach_decel, 1e-3)
+  if frac <= APPROACH_START:
+    return None
+  if frac >= 1.0:
+    return 0.0
+  return APPROACH_ACCEL_HI * (1.0 - (frac - APPROACH_START) / (1.0 - APPROACH_START))
+
+
 class GlideGovernor:
   """Per planner cycle: observe() before the MPC runs, distance_cost_factor() for its weights,
   apply() on its output. live=False (test bench) skips the settings and status files; pass settings."""
@@ -327,6 +382,8 @@ class GlideGovernor:
     self.gap_s = None
     self.t_follow = 0.0
     self.active = False
+    self.approach_cap_a = None
+    self._closing_f = 0.0
 
   def _stat(self):
     try:
@@ -347,7 +404,7 @@ class GlideGovernor:
       return
     self._mtime = mtime
     new = read_settings(self.path) if mtime is not None else PersonalizedSettings()
-    off = {k: False for k in ("glide", "soft_plan") if getattr(self.settings, k) and not getattr(new, k)}
+    off = {k: False for k in ("glide", "soft_plan", "approach") if getattr(self.settings, k) and not getattr(new, k)}
     if off:
       self.settings = replace(self.settings, **off)
       cloudlog.info(f"camry personalized: switched off mid-drive: {list(off)}")
@@ -359,7 +416,7 @@ class GlideGovernor:
     s = self.settings
     self._ready = False
     self.active = False
-    if not (s.glide or s.soft_plan):
+    if not (s.glide or s.soft_plan or s.approach):
       self.reset()
       return
     self.t_follow = t_follow
@@ -375,8 +432,20 @@ class GlideGovernor:
     if lead_ok and (ttc < s.min_ttc_s or lead.aLeadK < LEAD_BRAKE_LIMIT):
       self._block_frames = int(BLOCK_HOLD_TIME / self.dt)
 
+    # approach taper: needs a stable lead at speed, but not the glide gates (it only ever lowers acceleration).
+    # The closing speed is filtered (restarted for a new lead) so a noisy estimate can't make the cap flicker.
+    closing = -lead.vRel if lead_ok else 0.0
+    if self._stable_frames <= 1:
+      self._closing_f = closing
+    else:
+      self._closing_f += (closing - self._closing_f) * min(1.0, self.dt / APPROACH_FILTER_S)
+    self.approach_cap_a = None
+    if lead_ok and v_ego >= MIN_GLIDE_SPEED and self._stable_frames >= int(STABLE_TIME / self.dt):
+      self.approach_cap_a = approach_cap(s, lead.dRel, self._closing_f, v_ego, t_follow)
+
     if not lead_ok or v_ego < MIN_GLIDE_SPEED:
       self.zone = "no lead" if not lead_ok else "slow"
+      self._block_frames = max(0, self._block_frames - 1)   # a hold from a lead that is gone runs out too
     elif self._block_frames > 0:
       self._block_frames -= 1
       self.zone = "blocked"
@@ -411,16 +480,38 @@ class GlideGovernor:
     return 1.0
 
   def apply(self, a_target: float, source_is_lead: bool, accel_min: float) -> float:
-    """Returns the (possibly less firm) accel target. Never adds throttle, never makes braking firmer."""
+    """Returns the adjusted accel target: the approach taper can only lower a positive acceleration request (never
+    below 0), glide can only make a braking request less firm. Never adds throttle, never adds braking."""
     self.active = False
+    out = a_target
+    if self.approach_cap_a is not None and self.settings.approach and out > self.approach_cap_a:
+      out = self.approach_cap_a
+      self.zone = "approach"
+      self.active = True
     if not (self._ready and self.settings.glide):
-      return a_target
+      return out
     if not source_is_lead:
-      self.zone = "not lead"
-      return a_target
+      if not self.active:
+        self.zone = "not lead"
+      return out
     floor = glide_floor(self.settings, self.gap_s, self.t_follow, accel_min)
     if floor is None:
+      return out
+    self.active = self.active or out < floor
+    return max(out, floor)
+
+  def apply_overspeed(self, a_target: float, v_ego: float, v_target: float, accel_coast: float, speed_is_the_reason: bool) -> float:
+    """Glide over set speed. speed_is_the_reason: the MPC's source is cruise (no lead limiting) and the target is the set
+    speed or the speed limit (not a curve), so any braking is only to get back down to v_target. Then the request is
+    lifted to the overspeed floor (coast within the allowance, linearly firmer past it, capped). Never adds throttle,
+    nothing while a lead gate (TTC, lead braking) is holding glide off, nothing under MIN_GLIDE_SPEED."""
+    s = self.settings
+    if not (s.glide and s.overspeed_glide_mph > 0.0 and speed_is_the_reason) or v_ego < MIN_GLIDE_SPEED or self._block_frames > 0:
       return a_target
+    floor = overspeed_floor(s, v_ego - v_target, accel_coast)
+    if floor is None:
+      return a_target
+    self.zone = "overspeed"
     self.active = a_target < floor
     return max(a_target, floor)
 
@@ -504,10 +595,21 @@ class SafeGlide:
       return a_target
     try:
       out = float(self.governor.apply(a_target, source_is_lead, accel_min))
-      # never more braking than the MPC asked for, never throttle it didn't ask for
-      return out if math.isfinite(out) and a_target <= out <= max(a_target, 0.0) else a_target
+      # never throttle the MPC didn't ask for, never more braking than it asked for: an acceleration request may only
+      # come down (to 0 at the least), a braking request may only come up (to 0 at the most)
+      return out if math.isfinite(out) and min(a_target, 0.0) <= out <= max(a_target, 0.0) else a_target
     except Exception:
       self._fail("apply")
+      return a_target
+
+  def apply_overspeed(self, a_target: float, v_ego: float, v_target: float, accel_coast: float, speed_is_the_reason: bool) -> float:
+    if self.failed:
+      return a_target
+    try:
+      out = float(self.governor.apply_overspeed(a_target, v_ego, v_target, accel_coast, speed_is_the_reason))
+      return out if math.isfinite(out) and a_target <= out <= max(a_target, 0.0) else a_target
+    except Exception:
+      self._fail("apply_overspeed")
       return a_target
 
   def update(self, a_target: float, v_ego: float, lead, t_follow: float, source_is_lead: bool, accel_min: float) -> float:
