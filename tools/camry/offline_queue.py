@@ -143,8 +143,16 @@ class Queue:
     cur_path, fall_path = os.path.join(a.stage, "settings_defaults.json"), os.path.join(a.stage, "settings_fallback_125.json")
     fall145_path = os.path.join(a.stage, "settings_fallback_145.json")
     cp.write_settings(cur, cur_path)
-    cp.write_settings(replace(cur, follow_s=(1.1, 1.1, 1.25)), fall_path)
-    cp.write_settings(replace(cur, follow_s=(1.1, 1.1, 1.45)), fall145_path)
+    gates = []
+    for name, path, table in (("gate_fallback_1p25", fall_path, (1.1, 1.1, 1.25)), ("gate_fallback_1p45", fall145_path, (1.1, 1.1, 1.45))):
+      # follow_s needs its breakpoints: without them the file reads back as no override (the default table), and the
+      # gate would bench the defaults against themselves
+      cp.write_settings(replace(cur, follow_bp_mph=cp.DEFAULT_FOLLOW_BP_MPH, follow_s=table), path)
+      got = cp.follow_table_ms(cp.read_settings(path))
+      if got is None or [round(v, 3) for v in got[1]] != list(table):
+        self.log(f"skip {name}: {path} reads back as {got}, not the gaps {table}")
+        continue
+      gates.append((name, path))
     hist = os.path.join(a.out, "learned_copy.json")
     try:
       with open(os.path.join(os.path.dirname(cp.suggested_path()), "camry_long_learned.json")) as f:
@@ -160,8 +168,8 @@ class Queue:
     yield "driver_profile_all", [py, os.path.join(tools, "driver_profile.py"), "--out", profile], env
     yield "learner_dry_run", [py, os.path.join(tools, "suggest_long.py"), profile, "--settings", cur_path,
                               "--out", os.path.join(a.out, "suggested_dry_run.json"), "--history", hist], env
-    yield "gate_fallback_1p25", [py, os.path.join(tools, "follow_bench.py"), "--gate", cur_path, fall_path, "--modes", "all"], env
-    yield "gate_fallback_1p45", [py, os.path.join(tools, "follow_bench.py"), "--gate", cur_path, fall145_path, "--modes", "all"], env
+    for name, path in gates:
+      yield name, [py, os.path.join(tools, "follow_bench.py"), "--gate", cur_path, path, "--modes", "all"], env
 
   def run(self) -> int:
     self.log(f"queue running as test job pid {os.getpid()}, tree {self.a.tree}")
