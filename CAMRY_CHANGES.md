@@ -63,13 +63,18 @@ Personal sunnypilot branch for one car:
 
 4. **Personalized follow gap** (`selfdrive/controls/lib/camry_personalized.py`, `long_mpc.py`)
    - Stock Aggressive is a flat 1.25 s gap. The Personalized profile (item 5)
-     in the Aggressive slot defaults to a flat 1.1 s at every speed, the
-     driver's choice (2026-10-25): far enough that cars don't cut in. It is
-     kept as three points (35, 40 and 60 mph) so the learner can move each
-     speed on its own, never closer than 1.0 s (`tools/camry/suggest_long.py`
-     `LEARN_MIN_FOLLOW_S`, also the driver's choice).
+     in the Aggressive slot defaults to 1.1 s up to 40 mph, the driver's
+     choice (2026-10-25): far enough that cars don't cut in. It blends to
+     1.2 s at 60 mph and up (the driver's choice, 2026-10-28: a longer
+     highway gap held back and made them press the gas). The learner can
+     move each of the three points (35, 40, 60 mph) on its own, never
+     closer than 1.0 s (`tools/camry/suggest_long.py` `LEARN_MIN_FOLLOW_S`,
+     also the driver's choice).
    - History: PR #7 used 1.0 s up to 40 mph blending to 1.45 s at 60+;
-     PR #8 used 0.8 s up to 35 mph, 1.0 s at 40, 1.45 s at 60+.
+     PR #8 used 0.8 s up to 35 mph, 1.0 s at 40, 1.45 s at 60+. A flat
+     1.1 s was tried first for PR #9 and crashed on the bench when a lead
+     brakes at 3.5 m/s² from 60 mph to a stop (1.25 s and 1.45 s stop in
+     time).
    - Standard and Relaxed are unchanged. Checked with
      `tools/camry/follow_bench.py` (real planner vs. simulated leads).
 

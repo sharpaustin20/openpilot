@@ -21,7 +21,7 @@ MIN_EVENTS_SAFETY = 2    # brake takeovers at/under the target gap: suggest soon
 TTC_LATE_S = 15.0        # brake takeovers with a longer time to collision than this aren't about closing speed
 MIN_STEADY = 30          # steady-gap samples per speed bin before the manual gap counts
 STEP_S = 0.05            # s, one step on the follow table (Apply allows up to 0.1)
-# the learner never suggests a gap closer than this: the driver chose 1.1 s at every speed so cars don't cut in, and
+# the learner never suggests a gap closer than this: the driver chose 1.1 s in town so cars don't cut in, and
 # let the learner move it down to 1.0 s (2026-10-25), even though the driver follows closer when driving manually
 LEARN_MIN_FOLLOW_S = 1.0
 # driver_profile speed bins -> the follow table point they inform (mph)

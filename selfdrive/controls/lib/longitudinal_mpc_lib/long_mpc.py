@@ -72,8 +72,8 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
 
 
 # Camry Personalized profile (takes the Aggressive slot when switched on, see camry_personalized.py):
-# default table flat 1.1 s at every speed (the driver's choice, so cars don't cut in). The Personalized page can
-# override it with a learned table.
+# default table 1.1 s up to 40 mph (the driver's choice, so cars don't cut in), blending to 1.2 s at 60+ (also the
+# driver's choice). The Personalized page can override it with a learned table.
 PERSONALIZED_T_FOLLOW_BP = [b * camry_personalized.MPH for b in camry_personalized.DEFAULT_FOLLOW_BP_MPH]  # m/s
 PERSONALIZED_T_FOLLOW_V = list(camry_personalized.DEFAULT_FOLLOW_S)
 

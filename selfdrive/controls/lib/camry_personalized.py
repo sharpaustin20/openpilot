@@ -45,11 +45,12 @@ from openpilot.system.hardware import PC
 from openpilot.system.hardware.hw import Paths
 
 MPH = 0.44704
-# default Personalized follow-gap table (mph, s); long_mpc.py uses it in m/s. Flat 1.1 s, the driver's choice
-# (2026-10-25): close enough to follow like the driver, far enough that cars don't cut in. Three points so the learner
-# can still move each speed on its own.
+# default Personalized follow-gap table (mph, s); long_mpc.py uses it in m/s. 1.1 s up to 40 mph (the driver's choice,
+# so cars don't cut in), blending to 1.2 s at 60 mph and up (the driver's choice, 2026-10-28: 1.45 s held back on the
+# highway and made them press the gas). Flat 1.1 s crashed on the bench when a lead brakes at 3.5 m/s2 from 60 mph to
+# a stop; 1.25 s and 1.45 s stop in time. Each point can still be moved by the learner.
 DEFAULT_FOLLOW_BP_MPH = (35.0, 40.0, 60.0)
-DEFAULT_FOLLOW_S = (1.1, 1.1, 1.1)
+DEFAULT_FOLLOW_S = (1.1, 1.1, 1.2)
 STOP_DISTANCE = 6.0         # m, long_mpc.py: steady-state gap = t_follow * v + STOP_DISTANCE
 MIN_FOLLOW_S = 0.8          # s, follow-gap table limits
 MAX_FOLLOW_S = 1.75

@@ -135,7 +135,7 @@ class Queue:
     new = routes_since(FIRST_NEW_ROUTE)
     base_env = {k: v for k, v in os.environ.items() if k != "OPENPILOT_PREFIX"}
     env = dict(base_env, PYTHONPATH=a.tree, PYTHONDONTWRITEBYTECODE="1")
-    # settings files for the learner pass and the gate: the branch defaults (flat 1.1 s), and PR #9's fallback table
+    # settings files for the learner pass and the gate: the branch defaults (DEFAULT_FOLLOW_S), and PR #9's fallback tables
     sys.path.insert(0, a.tree)
     from openpilot.selfdrive.controls.lib import camry_personalized as cp
     from dataclasses import replace

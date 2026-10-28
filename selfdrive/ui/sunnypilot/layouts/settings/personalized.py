@@ -177,7 +177,7 @@ class PersonalizedLayout(Widget):
     items = [
       self._toggles["personalized"],
       text_item(lambda: tr("Follow Gap"), self._follow_text,
-                description=lambda: tr("Gap in seconds by speed. The default is 1.1 s at every speed; Apply below can tune it " +
+                description=lambda: tr("Gap in seconds by speed. The default is 1.1 s up to 40 mph, 1.2 s at 60 mph and up; Apply below can tune it " +
                                        "(the learner never suggests closer than 1.0 s).")),
       self._toggles["glide"],
       self._number("coast_margin_s", "Coast Zone Starts", "How far under the target gap coasting is allowed to start (relative band)."),
