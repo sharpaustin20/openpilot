@@ -104,19 +104,20 @@ def suggest_glide(tot, settings):
     for c in coasts:
       target = float(np.interp(c["mph"], bp_mph, vals))
       under.append(target - c["gap_s"])
-    margin = round(min(max(pct(under, 50), 0.0), 0.5), 2)
+    margin = round(min(max(pct(under, 50), cp.LIMITS["coast_margin_s"][0]), cp.LIMITS["coast_margin_s"][1]), 2)
     if abs(margin - settings.coast_margin_s) >= 0.05:
       out.append(dict(field="coast_margin_s", to=margin, why=f"{len(coasts)} coasts, lift-off {pct(under, 50):.2f} s under target",
                       **{"from": settings.coast_margin_s}))
     brakes = [c for c in coasts if c["end"] == "brake"]
     if len(brakes) >= MIN_EVENTS:
-      width = round(min(max(pct([c["gap_s"] - c["end_gap_s"] for c in brakes], 50), 0.1), 0.5), 2)
+      lo, hi = cp.LIMITS["light_width_s"]
+      width = round(min(max(pct([c["gap_s"] - c["end_gap_s"] for c in brakes], 50), lo), hi), 2)
       if abs(width - settings.light_width_s) >= 0.05:
         out.append(dict(field="light_width_s", to=width, why=f"{len(brakes)} coasts ended in braking after {width:.2f} s of gap",
                         **{"from": settings.light_width_s}))
     dec = pct([c["decel"] for c in coasts], 50)
     if dec is not None:
-      coast_a = round(min(max(dec, -0.6), 0.0), 1)
+      coast_a = round(min(max(dec, cp.LIMITS["coast_accel"][0]), cp.LIMITS["coast_accel"][1]), 1)
       if abs(coast_a - settings.coast_accel) >= 0.1:
         out.append(dict(field="coast_accel", to=coast_a, why=f"your coasts slow at {dec:.2f} m/s^2", **{"from": settings.coast_accel}))
   thr = None
@@ -126,7 +127,7 @@ def suggest_glide(tot, settings):
     thr = pcm_brake_threshold(pb)
   if thr is not None and settings.coast_accel <= thr:
     # coasting must stay above the level where the PCM starts braking
-    coast_a = round(min(thr + 0.1, 0.0), 1)
+    coast_a = round(min(thr + 0.1, cp.LIMITS["coast_accel"][1]), 1)
     out = [o for o in out if o["field"] != "coast_accel"]
     out.append(dict(field="coast_accel", to=coast_a, why=f"the car brakes for requests at or below {thr:.1f} m/s^2 (0x3B7)",
                     **{"from": settings.coast_accel}))

@@ -49,6 +49,9 @@ Personal sunnypilot branch for one car:
      Auto (testing) curve. It switches back as soon as the script exits
      (the marker holds the PID and process start time, so a crashed job
      or a stale marker after reboot is ignored).
+   - One test job at a time: while one runs, the wrapper refuses a second
+     one (exit code 75) without touching the marker, so the running job
+     stays marked. The parked learner retries 10 min later.
    - Car on: no effect, stock onroad CPU config (1689 MHz cap).
    - Once the device is overheated/critical (offroad this includes the
      stock 75 C offroad danger temp after 5 min), clocks drop to the
@@ -77,7 +80,9 @@ Personal sunnypilot branch for one car:
      (Personalized, Standard, Relaxed): on by default, so the speed-based
      gap table from item 4 is what the Aggressive position drives right
      after the update. Its toggle is the way back to stock Aggressive
-     (flat 1.25 s). Standard and Relaxed keep their stock gaps.
+     (flat 1.25 s). Standard and Relaxed keep their stock gaps. Settings >
+     Toggles > Driving Personality names the first position "Personalized"
+     while the profile is on (it follows the wheel's distance button as before).
    - **Glide** (own toggle, on by default, in every distance mode): behind
      a lead in the same lane, small braking requests are raised to the
      car's coast decel while the gap is a little under the current mode's
@@ -87,6 +92,27 @@ Personal sunnypilot branch for one car:
      harder than -1.0 m/s², right after a cut-in, below 11 mph, or for
      anything that isn't the lead. It only ever asks for less braking;
      FCW and stopping are untouched.
+   - **Glide over set speed** (Settings > Personalized, default 3 mph, 0 =
+     off): over your set speed or the speed limit target with nothing else
+     limiting the plan (no lead, curve, stop or end-to-end request), the
+     planner's braking is lifted to the car's own coast on that grade
+     (never a throttle request) while within the allowance. Past it,
+     braking ramps in linearly over 5 mph and is capped at -1.0 m/s², so
+     speed alone never brings hard braking. Curve slowdowns, leads, stops
+     and FCW are as before; the Glide toggle switches it off with the rest.
+     `tools/camry/drive_review.py` (car off, read-only) shows how much of
+     a drive's braking was for speed alone and what an allowance covers.
+   - **Ease into the gap** (approach taper, own toggle, on by default):
+     closing on a slower lead, the acceleration request is tapered off
+     once arriving at the lead's speed right at the target gap would need
+     more than a quarter of the closing-in decel (default 0.5 m/s², the
+     page's "Closing-In Decel"), down to no acceleration at all when it
+     would need all of it: the car stops gaining speed early and eases
+     into the gap instead of running up and braking. It only ever lowers
+     a positive acceleration request, never below zero; braking requests,
+     FCW and the glide safety gates are untouched. The closing speed it
+     uses is filtered over 1 s (a noisy estimate on this car). Off below
+     11 mph; switching it off applies mid-drive like Glide and Soft Plan.
    - **Soft plan** (on by default): while glide may act, the planner's
      weight on holding the exact distance is lowered (a runtime weight, no
      solver rebuild), so the plan itself glides. The too-close penalty is
@@ -94,12 +120,13 @@ Personal sunnypilot branch for one car:
      brake takeovers inside the glide band, one step softer after an hour
      engaged without one (never below 0.2).
    - **Settings** live in `/data/camry_long.json` (not a Params key, as with
-     the fan page), read once per drive; only switching Glide or Soft Plan
-     off applies mid-drive. Every value is validated and clamped; the gap
+     the fan page), read once per drive; only switching Glide, Soft Plan or Ease
+     Into The Gap off applies mid-drive. Every value is validated and clamped; the gap
      table can't go below 0.8 s or above 1.75 s, and the glide ranges stay
      inside what the bench has covered: coast decel -0.6 to -0.1 m/s², TTC
-     gate 5-10 s, coast margin 0.05-0.5 s, light braking -1.5 to -0.5 m/s²
-     (the page offers the same choices). Status for the page in
+     gate 5-10 s, coast margin 0.05-0.5 s, light braking -1.5 to -0.5 m/s²,
+     glide over set speed 0-10 mph, closing-in decel 0.3-1.0 m/s² (the page
+     offers the same choices). Status for the page in
      `/dev/shm/camry_long_state.json`.
    - **Learning** ("Learn After Drives", on by default): `camry_learnd`
      (manager, offroad only) runs `driver_profile.py` + `suggest_long.py`
@@ -130,7 +157,13 @@ Personal sunnypilot branch for one car:
      found no bit of 0x3B7 that tracks braking on this car (2026-10-24).
    - Bench: `tools/camry/follow_bench.py` runs glide on/off through the
      real planner in all three distance modes (`--table FILE` benches a
-     settings file before Apply).
+     settings file before Apply), including overspeed scenarios (over the
+     set speed on flat, downhill and uphill road, a set speed drop, and
+     with a slower lead far ahead) and approach scenarios (closing on a
+     slower lead from 80-150 m back at 30-60 mph: peak accel, jerk and the
+     overshoot under the target gap). `tools/camry/overlay.py` lays a fetched
+     branch over the installed tree under /tmp so it can be benched on the
+     comma without touching the installed code.
 
 ## Updating
 
