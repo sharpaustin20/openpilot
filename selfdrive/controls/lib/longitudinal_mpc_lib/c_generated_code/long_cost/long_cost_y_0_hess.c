@@ -35,6 +35,7 @@ extern "C" {
 #define casadi_s2 CASADI_PREFIX(s2)
 #define casadi_s3 CASADI_PREFIX(s3)
 #define casadi_s4 CASADI_PREFIX(s4)
+#define casadi_s5 CASADI_PREFIX(s5)
 #define casadi_sq CASADI_PREFIX(sq)
 
 /* Symbol visibility in DLLs */
@@ -58,58 +59,102 @@ static const casadi_int casadi_s0[7] = {3, 1, 0, 3, 0, 1, 2};
 static const casadi_int casadi_s1[5] = {1, 1, 0, 1, 0};
 static const casadi_int casadi_s2[3] = {0, 0, 0};
 static const casadi_int casadi_s3[10] = {6, 1, 0, 6, 0, 1, 2, 3, 4, 5};
-static const casadi_int casadi_s4[10] = {4, 4, 0, 0, 1, 3, 3, 2, 1, 2};
+static const casadi_int casadi_s4[14] = {10, 1, 0, 10, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+static const casadi_int casadi_s5[11] = {4, 4, 0, 0, 2, 4, 4, 1, 2, 1, 2};
 
-/* long_cost_y_0_hess:(i0[3],i1,i2[],i3[6],i4[6])->(o0[4x4,3nz]) */
+/* long_cost_y_0_hess:(i0[3],i1,i2[],i3[6],i4[10])->(o0[4x4,4nz]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
-  casadi_real a0, a1, a10, a2, a3, a4, a5, a6, a7, a8, a9;
-  a0=arg[3]? arg[3][0] : 0;
-  a1=arg[0]? arg[0][1] : 0;
-  a2=10.;
-  a2=(a1+a2);
-  a3=(1./a2);
-  a3=(a3/a2);
-  a3=(a0*a3);
-  if (res[0]!=0) res[0][0]=a3;
-  a3=(a0/a2);
-  a4=(a3/a2);
-  if (res[0]!=0) res[0][1]=a4;
-  a5=2.0000000000000001e-01;
-  a6=(a1+a1);
-  a6=(a5*a6);
-  a7=arg[4]? arg[4][4] : 0;
-  a6=(a6+a7);
-  a6=(a6/a2);
-  a8=arg[4]? arg[4][2] : 0;
-  a9=arg[0]? arg[0][0] : 0;
+  casadi_real a0, a1, a10, a11, a12, a13, a14, a15, a16, a2, a3, a4, a5, a6, a7, a8, a9;
+  a0=0.;
+  if (res[0]!=0) res[0][0]=a0;
+  a1=arg[4]? arg[4][7] : 0;
+  a2=arg[0]? arg[0][1] : 0;
+  a3=(a1*a2);
+  a4=10.;
+  a5=(a2+a4);
+  a3=(a3/a5);
+  a6=(-a3);
+  a7=arg[4]? arg[4][2] : 0;
+  a8=arg[0]? arg[0][0] : 0;
+  a7=(a7-a8);
+  a8=casadi_sq(a2);
+  a9=2.;
+  a10=arg[4]? arg[4][6] : 0;
+  a10=(a9*a10);
+  a8=(a8/a10);
+  a11=arg[4]? arg[4][4] : 0;
+  a12=(a11*a2);
+  a8=(a8+a12);
+  a12=6.;
+  a8=(a8+a12);
+  a7=(a7-a8);
+  a4=(a2+a4);
+  a7=(a7/a4);
+  a6=(a6<=a7);
+  a8=(!a6);
+  a0=(a0<=a7);
+  a12=(!a0);
+  a13=arg[3]? arg[3][0] : 0;
+  a14=(a12?a13:0);
+  a14=(a8?a14:0);
+  a15=arg[4]? arg[4][8] : 0;
+  a16=sqrt(a15);
+  a16=(a16*a13);
+  a16=(a12?a16:0);
+  a6=(a6?a16:0);
+  a14=(a14+a6);
+  a6=arg[4]? arg[4][9] : 0;
+  a6=sqrt(a6);
+  a6=(a6*a13);
+  a0=(a0?a6:0);
+  a14=(a14+a0);
+  a0=(1./a4);
+  a0=(a0/a4);
+  a0=(a14*a0);
+  if (res[0]!=0) res[0][1]=a0;
+  a0=(a14/a4);
+  a6=(a0/a4);
+  if (res[0]!=0) res[0][2]=a6;
+  a15=sqrt(a15);
+  a15=(a15*a13);
+  a13=(a13-a15);
+  a15=(a1/a5);
+  a16=(a3/a5);
+  a15=(a15-a16);
+  a15=(a15/a5);
+  a3=(a3/a5);
+  a3=(a3/a5);
+  a15=(a15-a3);
+  a15=(a13*a15);
+  a13=(a13/a5);
+  a13=(a13/a5);
+  a1=(a1*a13);
+  a15=(a15+a1);
+  a15=(-a15);
+  a12=(a12?a15:0);
+  a8=(a8?a12:0);
+  a12=(a2+a2);
+  a12=(a12/a10);
+  a12=(a12+a11);
+  a12=(a12/a4);
+  a15=(a7/a4);
+  a12=(a12+a15);
+  a12=(a12/a4);
+  a7=(a7/a4);
+  a7=(a7/a4);
+  a12=(a12+a7);
+  a14=(a14*a12);
+  a8=(a8+a14);
+  a11=(a11*a6);
+  a8=(a8+a11);
+  a0=(a0/a10);
+  a9=(a9*a0);
+  a2=(a2+a2);
+  a6=(a6/a10);
+  a2=(a2*a6);
+  a9=(a9-a2);
   a8=(a8-a9);
-  a9=casadi_sq(a1);
-  a10=5.;
-  a9=(a9/a10);
-  a10=(a7*a1);
-  a9=(a9+a10);
-  a10=6.;
-  a9=(a9+a10);
-  a8=(a8-a9);
-  a8=(a8/a2);
-  a9=(a8/a2);
-  a6=(a6+a9);
-  a6=(a6/a2);
-  a8=(a8/a2);
-  a8=(a8/a2);
-  a6=(a6+a8);
-  a0=(a0*a6);
-  a7=(a7*a4);
-  a0=(a0+a7);
-  a7=2.;
-  a3=(a5*a3);
-  a7=(a7*a3);
-  a1=(a1+a1);
-  a5=(a5*a4);
-  a1=(a1*a5);
-  a7=(a7-a1);
-  a0=(a0-a7);
-  if (res[0]!=0) res[0][2]=a0;
+  if (res[0]!=0) res[0][3]=a8;
   return 0;
 }
 
@@ -175,14 +220,14 @@ CASADI_SYMBOL_EXPORT const casadi_int* long_cost_y_0_hess_sparsity_in(casadi_int
     case 1: return casadi_s1;
     case 2: return casadi_s2;
     case 3: return casadi_s3;
-    case 4: return casadi_s3;
+    case 4: return casadi_s4;
     default: return 0;
   }
 }
 
 CASADI_SYMBOL_EXPORT const casadi_int* long_cost_y_0_hess_sparsity_out(casadi_int i) {
   switch (i) {
-    case 0: return casadi_s4;
+    case 0: return casadi_s5;
     default: return 0;
   }
 }

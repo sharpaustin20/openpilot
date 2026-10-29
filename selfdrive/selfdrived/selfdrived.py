@@ -18,6 +18,7 @@ from openpilot.selfdrive.car.car_specific import CarSpecificEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
+from openpilot.selfdrive.selfdrived.personality_hold import PersonalityHold
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -142,6 +143,7 @@ class SelfdriveD(CruiseHelper):
       max(log.LongitudinalPersonality.schema.enumerants.values()),
       self.params
     )
+    self.personality_hold = PersonalityHold()
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -478,7 +480,9 @@ class SelfdriveD(CruiseHelper):
     if self.CP.openpilotLongitudinalControl:
       if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
         if not self.experimental_mode_switched:
-          self.personality = (self.personality - 1) % 3
+          with self.personality_hold.lock:
+            self.personality = (self.personality - 1) % 3
+            self.personality_hold.pressed(self.personality)
           self.params.put('LongitudinalPersonality', self.personality)
           self.events.add(EventName.personalityChanged)
         self.experimental_mode_switched = False
@@ -626,7 +630,10 @@ class SelfdriveD(CruiseHelper):
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
-      self.personality = self.params.get("LongitudinalPersonality", return_default=True)
+      personality = self.params.get("LongitudinalPersonality", return_default=True)
+      with self.personality_hold.lock:
+        if self.personality_hold.accept(personality):
+          self.personality = personality
 
       self.mads.read_params()
       time.sleep(0.1)

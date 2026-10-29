@@ -113,8 +113,8 @@ class PersonalizedSettings:
   brake_assist: bool = True       # react sooner when the car ahead brakes hard (in every distance mode; bench 2026-10-29)
   lead_brake_tau: float = 0.3     # brake assist: how fast the planner expects the lead's braking to fade (stock radar lead 1.5, vision lead 0.3)
   brake_ramp: float = 0.25        # brake assist: scale on the planner's accel-change and jerk weights (1.0 = stock ramp)
-  assist_comfort_brake: float = 2.5  # brake assist: the planner's comfort brake while it acts (rebuilt solver only; 2.5 = stock)
-  # planner shaping (in every distance mode); acts only with the rebuilt planner solver, the defaults are stock
+  assist_comfort_brake: float = 2.0  # brake assist: the planner's comfort brake while it acts (2.5 = stock; bench 2026-10-29)
+  # planner shaping (in every distance mode; needs the rebuilt planner solver, which this branch ships); stock defaults
   mpc_comfort_brake: float = 2.5  # m/s^2 the desired distance plans to brake with: lower = starts slowing earlier and gentler
   mpc_glide_band_s: float = 0.0   # s under the target gap the planner itself plans to coast (0 = off)
   mpc_glide_weight: float = 1.0   # weight on the gap error inside that band (1 = stock)
@@ -436,8 +436,10 @@ class GlideGovernor:
     self._closing_f = 0.0
 
   def _stat(self):
+    # write_settings replaces the file, so a new inode marks a change even when two writes share a coarse mtime tick
     try:
-      return os.stat(self.path or settings_path()).st_mtime_ns
+      st = os.stat(self.path or settings_path())
+      return st.st_ino, st.st_mtime_ns, st.st_size
     except OSError:
       return None
 

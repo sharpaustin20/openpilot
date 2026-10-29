@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -61,7 +62,8 @@ class TestSettings:
     s = PersonalizedSettings(personalized=True, glide=True, band=BAND_FIXED, light_brake=-0.6, follow_bp_mph=(40.0,), follow_s=(1.1,))
     write_settings(s, p)
     assert read_settings(p) == s
-    assert json.load(open(p))["glide"] is True
+    with open(p) as f:
+      assert json.load(f)["glide"] is True
 
 
 class TestFloor:
@@ -574,6 +576,17 @@ class TestBrakeAssist:
     g.refresh_settings(now=100.0)
     assert not g.settings.brake_assist and g.settings.lead_brake_tau == 0.3   # only the switch-off applies mid-drive
 
+  def test_switch_off_seen_when_mtime_unchanged(self, tmp_path):
+    # the comma's /tmp keeps coarse mtimes: two quick writes can share one
+    path = str(tmp_path / "camry_long.json")
+    write_settings(PersonalizedSettings(), path)
+    first = os.stat(path).st_mtime_ns
+    g = GlideGovernor(live=True, path=path)
+    write_settings(PersonalizedSettings(brake_assist=False), path)
+    os.utime(path, ns=(first, first))
+    g.refresh_settings(now=100.0)
+    assert not g.settings.brake_assist
+
   def test_on_while_lead_brakes_hard_then_holds(self):
     g = self.gov(brake_assist=True)
     g.observe(26.8, lead(1.2, a_lead=-1.0), 1.0)
@@ -643,10 +656,15 @@ class TestPlannerShaping:
   """The rebuilt planner formula: compiled constants (comfort brake, the shape of the distance cost) as runtime
   parameters. Stock everywhere by default, and sent only to a solver built with them."""
 
-  def test_defaults_are_stock(self):
+  def test_defaults_are_stock_except_while_assist_acts(self):
     s = PersonalizedSettings()
     assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == cp.MPC_SHAPING_STOCK
-    assert GlideGovernor(live=False, settings=s).mpc_shaping() == cp.MPC_SHAPING_STOCK
+    assert s.assist_comfort_brake == 2.0
+    g = GlideGovernor(live=False, settings=s)
+    g.observe(26.8, lead(1.2, a_lead=-0.5), 1.0)
+    assert g.mpc_shaping() == cp.MPC_SHAPING_STOCK
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert g.mpc_shaping() == (2.0, 0.0, 1.0, 1.0)
 
   def test_assist_comfort_brake_only_while_assist_acts(self):
     g = GlideGovernor(live=False, settings=PersonalizedSettings(assist_comfort_brake=1.5))
