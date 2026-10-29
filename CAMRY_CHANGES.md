@@ -85,6 +85,17 @@ Personal sunnypilot branch for one car:
      at 60+. A flat 1.1 s t_follow (1.32 s real at 60 mph) crashed on the
      bench when a lead brakes at 3.5 m/s² from 60 mph to a stop (1.25 s and
      1.45 s stop in time).
+   - Comma bench of this table (2026-10-29, `follow_bench.py`, every mode):
+     it holds 1.15 / 1.13 / 1.20 s real at 30 / 45 / 60 mph, but fails three
+     lead-stop tests that the table before it (0.8 / 1.0 / 1.45 s t_follow)
+     passes: a lead braking at 2.0 m/s² to a stop from 60 mph ends 0.3 m
+     short with no warning (1.8 m before), and a lead braking at 3.5 m/s²
+     to a stop from 45 mph or from 60 mph collides (1.6 and 2.0 m short
+     before); 6 crashes and 549 warning frames over the whole set against
+     3 and 255. The limit is the -3.5 m/s² brake cap (planner, car port and
+     panda safety), which is not changed. Kept on purpose, the driver's
+     choice on 2026-10-29 with that result in front of them; the stock
+     emergency braking stays independent of all of this.
    - Standard and Relaxed are unchanged. `tools/camry/drive_review.py`
      reports real gaps and targets. Checked with `tools/camry/follow_bench.py`
      (real planner vs. simulated leads; tunes in `REAL` are converted the
@@ -170,7 +181,8 @@ Personal sunnypilot branch for one car:
      settings against the current ones (the full scenario set, in the same
      test job; in Standard and Relaxed too when a glide or soft plan value
      changes). The rule is strict: more collision-warning frames in any
-     scenario, a crash, braking below -2.5 m/s² or a gap under 0.6 s where
+     scenario, a crash, braking below -2.5 m/s² or a gap under the 0.6 s
+     glide floor (planner terms: the real gap minus 6 m / speed) where
      the current settings had none, or a missed steady gap, in any mode,
      fails the candidate. If the whole set fails, the glide/soft plan
      changes and the gap-table change are benched separately and the
@@ -187,7 +199,9 @@ Personal sunnypilot branch for one car:
      slower lead from 80-150 m back at 30-60 mph: peak accel, jerk and the
      overshoot under the target gap). `tools/camry/overlay.py` lays a fetched
      branch over the installed tree under /tmp so it can be benched on the
-     comma without touching the installed code.
+     comma without touching the installed code. Each run also prints the
+     planner's mean time per 20 Hz frame for every tune (the 3X budget is
+     50 ms; about 5 ms with everything on).
 
 6. **Flag button** (`selfdrive/ui/sunnypilot/onroad/flag_button.py`, `selfdrive/ui/onroad/augmented_road_view.py`,
    `tools/camry/flag_review.py`)

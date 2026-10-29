@@ -12,6 +12,7 @@
 #                                                   (used by suggest_long.py; --modes all adds Standard and Relaxed)
 import os
 import sys
+import time
 from dataclasses import replace
 os.environ.setdefault("OPENPILOT_PREFIX", "lbench")   # isolate params/msgq namespace from the real system
 
@@ -134,10 +135,21 @@ def set_tune(bp_mph, vals, settings=None, personality=AGG, real=False):
   return stock
 
 
+FRAME_T = [0.0, 0]   # planner.update() seconds and frames in this worker process (one job per process), for the per-frame cost
+
+
 def personalize(planner):
   st = CUR_SETTINGS[0]
   planner.glide = cp.SafeGlide(cp.GlideGovernor(dt=DT, live=False, settings=st))   # explicit settings, never the device's file
   planner.mpc.personalized = cp.follow_table_ms(st)   # None unless the tune's settings say Personalized
+  update = planner.update
+
+  def timed_update(sm):
+    t0 = time.perf_counter()
+    update(sm)
+    FRAME_T[0] += time.perf_counter() - t0
+    FRAME_T[1] += 1
+  planner.update = timed_update
   return planner
 
 
@@ -245,7 +257,7 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   return dict(gap_m=d[0], expect_m=expect, gap_s=d[0] / max(v[0], 0.1), min_gap_m=d.min(), min_ttc=ttc.min(),
               min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4),
               brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, end_gap_s=d[-1] / max(v[-1], 0.1),
-              min_gap_s=d.min() / max(v[0], 0.1))
+              min_gap_s=d.min() / max(v[0], 0.1), min_gap_tf=(d.min() - long_mpc.STOP_DISTANCE) / max(v[0], 0.1))
 
 
 def scenarios():
@@ -323,7 +335,8 @@ def run_overspeed(v0_mph, cruise_profile, duration, pitch=0.0, lead=None):
   if lead is not None:
     closing = vl - v
     ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
-    res.update(min_gap_m=float(d.min()), min_gap_s=float(d.min() / max(v.max(), 0.1)), min_ttc=float(ttc.min()))
+    res.update(min_gap_m=float(d.min()), min_gap_s=float(d.min() / max(v.max(), 0.1)),
+               min_gap_tf=float((d.min() - long_mpc.STOP_DISTANCE) / max(v.max(), 0.1)), min_ttc=float(ttc.min()))
   return res
 
 
@@ -363,7 +376,8 @@ def run_approach(v_ego_mph, v_lead_mph, d0, cruise_mph, duration=60.0):
   ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
   outside = np.flatnonzero(np.abs(d - expect) > 0.15 * expect + 1)
   under = max(0.0, expect - d.min())
-  return dict(min_gap_m=d.min(), min_gap_s=d.min() / max(v.max(), 0.1), expect_m=expect, under_m=under, under_s=under / max(vl, 0.1),
+  return dict(min_gap_m=d.min(), min_gap_s=d.min() / max(v.max(), 0.1), min_gap_tf=(d.min() - long_mpc.STOP_DISTANCE) / max(v.max(), 0.1),
+              expect_m=expect, under_m=under, under_s=under / max(vl, 0.1),
               peak_a=acc.max(), min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, brake_s=float((acc < BRAKE_A).sum() * DT),
               fcw=fcw, crash=bool(d.min() < 0.4), min_ttc=ttc.min(), glide_s=glide_s,
               settle_s=float((outside[-1] + 1) * DT) if len(outside) else 0.0)
@@ -384,6 +398,12 @@ def job(args):
   bp, vals = TUNES[name]
   # each worker process gets its own copy of the patched module
   set_tune(bp, vals, SETTINGS[name][1] if name in SETTINGS else None, PERSONALITIES.get(name, AGG), name in REAL)
+  name, title, m = _job(name, idx)
+  m["frame_ms"] = 1000.0 * FRAME_T[0] / max(FRAME_T[1], 1)   # mean planner.update() time per 20 Hz frame, this scenario
+  return name, title, m
+
+
+def _job(name, idx):
   sc = scenarios()
   if idx < len(sc):
     title, prof, v0, d0, dur = sc[idx]
@@ -432,7 +452,8 @@ def gate(cur_path, cand_path, modes=("personalized",)):
   slot and, with --modes all, in Standard and Relaxed too (glide and soft plan act there as well). PASS unless in some
   scenario of some mode the candidate has more FCW frames than the current (strict: the bench is deterministic, so even
   one more frame is an effect of the change, e.g. a closer gap, not noise), crashes where the current doesn't, brakes
-  harder than -2.5 where the current didn't, gets under HARD_MIN_GAP_S where the current didn't, or misses its steady
+  harder than -2.5 where the current didn't, gets under HARD_MIN_GAP_S where the current didn't (in planner terms, the real
+  gap minus 6 m / speed, the terms the glide floor itself is in; the min gaps printed are real), or misses its steady
   gap. suggest_long.py then benches the glide/soft plan changes and the gap table change separately on a fail. Prints
   a verdict line and a GATE_JSON line (read by suggest_long.py before a suggestion is offered or applied)."""
   import json
@@ -457,8 +478,10 @@ def gate(cur_path, cand_path, modes=("personalized",)):
         worse.append(f"{mode}, {k}: crash")
       if m["min_a"] < -2.5 <= b["min_a"]:
         worse.append(f"{mode}, {k}: decel {m['min_a']:.2f}")
-      if "min_gap_s" in m and m["min_gap_s"] < cp.HARD_MIN_GAP_S <= b.get("min_gap_s", 9.0):
-        worse.append(f"{mode}, {k}: min gap {m['min_gap_s']:.2f} s")
+      # the glide floor is in planner terms (real gap minus 6 m / speed), so the rule compares that, not the real gap
+      if "min_gap_tf" in m and m["min_gap_tf"] < cp.HARD_MIN_GAP_S <= b.get("min_gap_tf", 9.0):
+        worse.append(f"{mode}, {k}: min gap {m['min_gap_s']:.2f} s real, {m['min_gap_tf']:.2f} s in planner terms, under the "
+                     f"{cp.HARD_MIN_GAP_S} s glide floor")
       if k.startswith("steady") and abs(m["gap_m"] - m["expect_m"]) > 0.15 * m["expect_m"] + 1:
         worse.append(f"{mode}, {k}: steady gap {m['gap_m']:.0f} m, table {m['expect_m']:.0f} m")
       if k in OVERSPEED_TITLES and m.get("pitch", 0.0) == 0.0 and m.get("back_s") is None and b.get("back_s") is not None:
@@ -497,6 +520,8 @@ def main():
   worst = {n: dict(min_a=min(m["min_a"] for m in res[n].values()), fcw=sum(m["fcw"] for m in res[n].values()),
                    crashes=sum(m["crash"] for m in res[n].values())) for n in names}
   print("\nsummary: " + " | ".join(f"{n}: hardest {w['min_a']:.2f}, FCW frames {w['fcw']}, crashes {w['crashes']}" for n, w in worst.items()))
+  # planner cost: mean planner.update() time per frame over all scenarios of a tune (the comma's 20 Hz budget is 50 ms)
+  print("planner ms per frame: " + " | ".join(f"{n} {np.mean([m['frame_ms'] for m in res[n].values()]):.2f}" for n in names))
 
   # glide: braking time and gap behind the same lead, glide profiles vs their table without glide
   print(f"\nglide scenarios (seconds braking harder than {BRAKE_A:.1f} m/s2 / seconds gliding / gap at end s / min gap s):")
