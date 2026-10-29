@@ -546,17 +546,29 @@ class TestBrakeAssist:
   def gov(self, **kw):
     return GlideGovernor(live=False, settings=PersonalizedSettings(**kw))
 
-  def test_off_by_default(self):
-    g = self.gov()
+  def test_on_by_default(self):
+    s = PersonalizedSettings()
+    assert s.brake_assist and (s.lead_brake_tau, s.brake_ramp) == (0.3, 0.25)   # "firm": passed the 2026-10-29 bench gate
+    g = self.gov(brake_assist=False)
     g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
-    assert not g.assist and g.mpc_ramp_factor() == 1.0 and g.lead_tau_cap() is None
+    assert not g.assist and g.mpc_ramp_factor() == 1.0 and g.lead_tau_cap() is None   # off: the stock planner
+
+  def test_switching_off_mid_drive_applies_right_away(self, tmp_path):
+    path = str(tmp_path / "camry_long.json")
+    write_settings(PersonalizedSettings(), path)
+    g = GlideGovernor(live=True, path=path)
+    g.refresh_settings(now=0.0)
+    assert g.settings.brake_assist
+    write_settings(PersonalizedSettings(brake_assist=False, lead_brake_tau=0.5), path)
+    g.refresh_settings(now=100.0)
+    assert not g.settings.brake_assist and g.settings.lead_brake_tau == 0.3   # only the switch-off applies mid-drive
 
   def test_on_while_lead_brakes_hard_then_holds(self):
     g = self.gov(brake_assist=True)
     g.observe(26.8, lead(1.2, a_lead=-1.0), 1.0)
     assert not g.assist   # ordinary slowing ahead: stock planner
     g.observe(26.8, lead(1.2, a_lead=-2.0), 1.0)
-    assert g.assist and g.mpc_ramp_factor() == 0.5 and g.lead_tau_cap() == 0.3
+    assert g.assist and g.mpc_ramp_factor() == 0.25 and g.lead_tau_cap() == 0.3
     hold = int(cp.BRAKE_ASSIST_HOLD / g.dt)
     for _ in range(hold - 1):
       g.observe(26.8, lead(1.2, a_lead=0.0), 1.0)
@@ -590,7 +602,8 @@ class TestBrakeAssist:
   def test_settings_clamped(self):
     s = parse_settings({"brake_assist": True, "lead_brake_tau": 0.0, "brake_ramp": 5})
     assert s.brake_assist and s.lead_brake_tau == cp.LIMITS["lead_brake_tau"][0] and s.brake_ramp == 1.0
-    assert not parse_settings({"brake_assist": "yes"}).brake_assist
+    assert parse_settings({"brake_assist": "off"}).brake_assist   # not a bool: the default (on)
+    assert not parse_settings({"brake_assist": False}).brake_assist
 
   def test_mpc_lead_tau_cap(self, long_mpc_module):
     m = long_mpc_module

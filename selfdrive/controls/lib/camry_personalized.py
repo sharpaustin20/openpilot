@@ -106,9 +106,9 @@ class PersonalizedSettings:
   approach_decel: float = 0.5     # m/s^2, planned decel for closing in: lift off once arriving at the target gap needs this much
   soft_plan: bool = True
   soft_distance_factor: float = 0.3  # weight on holding the exact distance while in the glide band (1.0 = stock)
-  brake_assist: bool = False      # react sooner when the car ahead brakes hard (in every distance mode)
+  brake_assist: bool = True       # react sooner when the car ahead brakes hard (in every distance mode; bench 2026-10-29)
   lead_brake_tau: float = 0.3     # brake assist: how fast the planner expects the lead's braking to fade (stock radar lead 1.5, vision lead 0.3)
-  brake_ramp: float = 0.5         # brake assist: scale on the planner's accel-change and jerk weights (1.0 = stock ramp)
+  brake_ramp: float = 0.25        # brake assist: scale on the planner's accel-change and jerk weights (1.0 = stock ramp)
   # planner shaping (in every distance mode); acts only with the rebuilt planner solver, the defaults are stock
   mpc_comfort_brake: float = 2.5  # m/s^2 the desired distance plans to brake with: lower = starts slowing earlier and gentler
   mpc_glide_band_s: float = 0.0   # s under the target gap the planner itself plans to coast (0 = off)
@@ -436,7 +436,8 @@ class GlideGovernor:
       return None
 
   def refresh_settings(self, now: float | None = None):
-    """Mid-drive only switching glide or soft plan off is applied; everything else waits for the next drive."""
+    """Mid-drive only switching glide, soft plan, the approach taper or brake assist off is applied; everything else
+    waits for the next drive."""
     if not self.live:
       return
     now = time.monotonic() if now is None else now
@@ -448,7 +449,7 @@ class GlideGovernor:
       return
     self._mtime = mtime
     new = read_settings(self.path) if mtime is not None else PersonalizedSettings()
-    off = {k: False for k in ("glide", "soft_plan", "approach") if getattr(self.settings, k) and not getattr(new, k)}
+    off = {k: False for k in ("glide", "soft_plan", "approach", "brake_assist") if getattr(self.settings, k) and not getattr(new, k)}
     if off:
       self.settings = replace(self.settings, **off)
       cloudlog.info(f"camry personalized: switched off mid-drive: {list(off)}")

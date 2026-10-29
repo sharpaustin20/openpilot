@@ -152,7 +152,7 @@ class PersonalizedLayout(Widget):
       ("personalized", "Personalized Profile",
        "Your gap table in the Aggressive position of the distance button: Personalized, Standard, Relaxed. On by default; " +
        "off = stock Aggressive (1.25 s plus the 6 m buffer: about 1.5 s real at 60 mph). Changes here apply at the next drive; " +
-       "only switching Glide, Soft Plan or Ease Into The Gap " +
+       "only switching Glide, Soft Plan, Ease Into The Gap or Brake Assist " +
        "off applies right away."),
       ("glide", "Glide",
        "In every distance mode: behind a lead, coast instead of braking while the gap is in the coast zone under that mode's target, " +
@@ -166,6 +166,10 @@ class PersonalizedLayout(Widget):
        "The planner itself cares less about holding the exact distance while in the glide band, so it plans the glide " +
        "instead of braking to win the gap back. The too-close penalty is unchanged. On by default; the learner tunes its " +
        "strength: firmer after brake takeovers inside the glide band, softer after an hour engaged without one."),
+      ("brake_assist", "Brake Assist",
+       "In every distance mode: when the car ahead brakes hard (radar, harder than 1.5 m/s²), the planner expects that braking " +
+       "to last instead of fading and ramps its own braking in faster, for a second after it eases. Starts braking sooner and " +
+       "brakes less hard at the end; the -3.5 m/s² limit is unchanged. On by default; off = the stock planner's reaction."),
       ("learn", "Learn After Drives",
        "While parked (10 min after the car is off, battery above 12.2 V, device below 60 °C), look at your gas presses, brake takeovers, " +
        "distance-button changes and manual driving, and suggest small changes below."),
@@ -198,6 +202,7 @@ class PersonalizedLayout(Widget):
                    "higher closes in quicker."),
       self._toggles["soft_plan"],
       self._number("soft_distance_factor", "Soft Plan Strength", "Weight on holding the exact distance while in the glide band. 1.0 = stock, lower = softer."),
+      self._toggles["brake_assist"],
       text_item(lambda: tr("Live"), self._live_text),
       self._toggles["learn"],
       text_item(lambda: tr("Interventions"), self._interventions_text,
