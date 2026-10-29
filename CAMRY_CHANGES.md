@@ -254,19 +254,37 @@ Personal sunnypilot branch for one car:
      the stock reaction (`BRAKE_ASSIST_OFF_IN`); its stock gap is the
      longest anyway.
 
-8. **Planner shaping, groundwork** (`long_mpc.py`, `tools/camry/build_long_solver.py`)
+8. **Planner shaping, rebuilt solver** (`long_mpc.py`, `longitudinal_mpc_lib/c_generated_code/`,
+   `tools/camry/build_long_solver.py`, Settings > Personalized > Planned Braking)
    - The MPC formula takes four more runtime parameters in place of
      compiled constants: the comfort brake its desired distance plans for
      (stock 2.5 m/s²), and a piecewise-linear shape of the distance error (a
      weight on a gap longer than desired, and a band under it the planner may
      plan to coast through). Stock values give openpilot's cost exactly.
-   - The committed solver is still openpilot's (6 parameters). The planner
-     reads the parameter count from the solver library it loads and sends
-     the extra four only to a solver rebuilt from this formula, so until
-     then this changes nothing. `build_long_solver.py` rebuilds it in an
-     overlay under /tmp on the comma with the installed acados. That
-     rebuild, with stock values, benched identical to the installed solver
-     (2026-10-29).
+   - The committed solver (`libacados_ocp_solver_long.so` and its generated
+     code, 10 parameters) was rebuilt from this formula on the comma itself
+     (2026-10-29, `build_long_solver.py` in an overlay under /tmp, the
+     installed acados 0.2.2 and clang; library md5 c3157065…). With stock
+     values it benched identical to openpilot's solver. The acados
+     libraries and the Cython wrapper are unchanged. The planner reads the
+     parameter count from the library it loads and sends the extra four only
+     when it has them, so reverting the solver files alone is also safe.
+   - Default: while brake assist acts (item 7), the planner plans for
+     2.0 m/s² instead of 2.5 (`assist_comfort_brake`), so it starts braking
+     a little earlier for a hard-braking lead. Everything else stays stock.
+     Comma bench on top of item 7: FCW frames 157 to 143 with the exact lead
+     and 400 to 380 with the radard-like lead, and a lead braking 5.0 m/s²
+     to a stop from 45 mph goes from 12 FCW frames to none. Following, closing
+     in and cut-ins are exactly as before, and the strict gate passes with
+     both lead models. 1.5 cut more (140 and 346) but braked past -2.5 m/s²
+     in three moderate-braking scenarios with the radard-like lead, which the
+     gate fails.
+   - "Planned Braking" (`mpc_comfort_brake`, every distance mode) is on the
+     page at stock 2.5. 1.5 benched safer (140 and 345 FCW frames, gate
+     PASS) and closes in more gently, but takes longer to settle in behind a
+     slower car (60 to 50 mph: 56 s instead of 38) and brakes a little
+     firmer for cut-ins (-1.36 instead of -1.22 m/s²). The glide band and
+     the far-gap weight did not help on the bench and stay off.
 
 ## Updating
 
