@@ -163,6 +163,23 @@ Personal sunnypilot branch for one car:
      branch over the installed tree under /tmp so it can be benched on the
      comma without touching the installed code.
 
+6. **Flag button** (`selfdrive/ui/sunnypilot/onroad/flag_button.py`, `selfdrive/ui/onroad/augmented_road_view.py`,
+   `tools/camry/flag_review.py`)
+   - A flag button at the bottom right of the driving screen: one tap marks
+     "I didn't like what the car just did". It turns green with the drive's
+     flag count for 2 s; taps within 2 s count once. It sends the same
+     message as the sidebar's flag (which needs the sidebar opened first),
+     so the log gets a userBookmark, "Bookmark Saved" shows and loggerd keeps
+     the segment (the deleter keeps the newest 5 flagged segments).
+   - Nothing else runs while driving. `tools/camry/flag_review.py` (car off,
+     through `test_job.py`, one worker per segment) reads only the flagged
+     segments and their neighbors and prints, per flag, 20 s before to 10 s
+     after: speed, lead and real gap (distance / speed), closing speed, the
+     planner's request, the driver's pedals, FCW, alerts and a one-line guess
+     at what happened. Summaries and 0.5 s timelines are kept in
+     /data/camry_flags.json even after the drive itself is deleted. The
+     parked learning job runs it on each batch of new drives.
+
 ## Updating
 
 This branch is pinned to v2026.002.002. To move to a newer sunnypilot

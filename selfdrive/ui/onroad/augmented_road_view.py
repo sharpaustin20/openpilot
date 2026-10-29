@@ -19,6 +19,7 @@ if gui_app.sunnypilot_ui():
   from openpilot.selfdrive.ui.sunnypilot.onroad.driver_state import DriverStateRendererSP as DriverStateRenderer
   from openpilot.selfdrive.ui.sunnypilot.onroad.hud_renderer import HudRendererSP as HudRenderer
   from openpilot.selfdrive.ui.sunnypilot.ui_state import OnroadTimerStatus
+  from openpilot.selfdrive.ui.sunnypilot.onroad.flag_button import FlagButton
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.LiveCalibrationData.Status.calibrated
@@ -56,6 +57,7 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
     self._hud_renderer = HudRenderer()
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverStateRenderer()
+    self._flag_button = FlagButton() if gui_app.sunnypilot_ui() else None  # Camry: one-tap flag, bottom right
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -93,6 +95,8 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
     self._hud_renderer.render(self._content_rect)
     self.alert_renderer.render(self._content_rect)
     self.driver_state_renderer.render(self._content_rect)
+    if self._flag_button is not None:   # after the alerts, so it can still be tapped during one
+      self._flag_button.render(self._flag_button.button_rect(self._content_rect))
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
@@ -103,8 +107,13 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
     # Draw colored border based on driving state
     self._draw_border(rect)
 
+  def set_flag_callback(self, callback):
+    if self._flag_button is not None:
+      self._flag_button.set_flag_callback(callback)
+
   def _handle_mouse_press(self, _):
-    if not self._hud_renderer.user_interacting() and self._click_callback is not None:
+    flagging = self._flag_button is not None and self._flag_button.is_pressed
+    if not self._hud_renderer.user_interacting() and not flagging and self._click_callback is not None:
       self._click_callback()
 
   def _handle_mouse_release(self, _):
