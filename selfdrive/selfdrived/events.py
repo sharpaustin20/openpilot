@@ -16,6 +16,12 @@ from openpilot.sunnypilot.selfdrive.selfdrived.events_base import EventsBase, Pr
   NoEntryAlert, SoftDisableAlert, UserSoftDisableAlert, ImmediateDisableAlert, EngagementAlert, NormalPermanentAlert, \
   StartupAlert, AlertCallbackType, wrong_car_mode_alert
 
+try:
+  from openpilot.selfdrive.controls.lib.camry_personalized import mode_name as camry_mode_name
+except Exception:  # alerts must work even if the Personalized module is broken
+  def camry_mode_name(personality):
+    return str(personality).title()
+
 
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
@@ -200,7 +206,10 @@ def longitudinal_maneuver_alert(CP: car.CarParams, CS: car.CarState, sm: messagi
 
 
 def personality_changed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
-  personality = str(personality).title()
+  try:
+    personality = camry_mode_name(personality)   # Camry: "Personalized" while that profile owns the Aggressive slot
+  except Exception:
+    personality = str(personality).title()
   return NormalPermanentAlert(f"Driving Personality: {personality}", duration=1.5)
 
 

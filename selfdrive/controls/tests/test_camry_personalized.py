@@ -487,3 +487,22 @@ class TestRealGap:
     assert dr.t_follow(0, v, table, real=True, floor=0.7) == pytest.approx(1.2 - 6 / v)
     assert dr.t_follow(0, v, table) == pytest.approx(1.2)   # code from before the real gap: the table was t_follow
     assert dr.t_follow(1, v, table, real=True, floor=0.7) == 1.45   # Standard keeps its stock t_follow
+
+
+class TestModeName:
+  """The distance-button popup ("Driving Personality: ...") names the Aggressive slot like Settings does."""
+
+  def test_names(self, tmp_path):
+    on, off = str(tmp_path / "on.json"), str(tmp_path / "off.json")
+    write_settings(PersonalizedSettings(personalized=True), on)
+    write_settings(PersonalizedSettings(personalized=False), off)
+    assert cp.mode_name("aggressive", on) == "Personalized"
+    assert cp.mode_name("aggressive", off) == "Aggressive"
+    assert cp.mode_name("standard", on) == "Standard"
+    assert cp.mode_name("relaxed", on) == "Relaxed"
+    assert cp.mode_name("aggressive", str(tmp_path / "missing.json")) == "Personalized"   # no file = the defaults (on)
+
+  def test_broken_file_never_raises(self, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert cp.mode_name("aggressive", str(bad)) == "Personalized"

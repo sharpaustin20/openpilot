@@ -302,6 +302,13 @@ def t_follow_for_gap(gap_s: float, v_ego: float) -> float:
   return max(gap_s - STOP_DISTANCE / max(v_ego, 0.1), MIN_T_FOLLOW)
 
 
+def mode_name(personality, path: str | None = None) -> str:
+  """Display name of a longitudinal personality ("aggressive", "standard", "relaxed"): "Personalized" for the
+  Aggressive slot while the Personalized profile is on. Never raises (selfdrived's distance-button alert uses it)."""
+  name = str(personality).title()
+  return "Personalized" if name == "Aggressive" and read_settings(path).personalized else name
+
+
 def follow_table_ms(s: PersonalizedSettings):
   """(breakpoints m/s, real gaps s) for long_mpc.get_T_FOLLOW, which converts them with t_follow_for_gap. None =
   Personalized off (stock Aggressive); the default table when no override is set."""
