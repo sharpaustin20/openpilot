@@ -118,8 +118,13 @@ def good_lead(k):
 
 
 def t_equiv(k):
-  """Gap expressed as sunnypilot's t_follow (what the planner setting means)."""
+  """Gap expressed as sunnypilot's t_follow (what the planner's glide bands are measured in)."""
   return (k["d"] - STOP_DISTANCE) / max(k["v"], 0.1)
+
+
+def real_gap(k):
+  """The real gap: distance / speed, bumper to bumper (what the Personalized table means)."""
+  return k["d"] / max(k["v"], 0.1)
 
 
 def ttc(k):
@@ -213,7 +218,7 @@ def analyze(route, ticks):
       b = bin_of(k["v"])
       if b and i % 4 == 0 and same_lead_window(ticks, i - 20, i):   # 5 Hz samples, lead stable for 1 s
         key = md if md.startswith("manual") else f"engaged_{PERSONALITY.get(k['personality'], 'unknown')}"
-        out["steady_gap"][key][b].append(round(t_equiv(k), 3))
+        out["steady_gap"][key][b].append(round(real_gap(k), 3))
 
     if md in ("manual", "manual_lat") and good_lead(k):
       if k["vrel"] > 1.0 and k["gas"] and i % 4 == 0:
@@ -237,7 +242,8 @@ def analyze(route, ticks):
       ok = good_lead(k) and same_lead_window(ticks, i - W, j)
       out["gas_overrides"].append(dict(
         t=round(k["t"], 1), seg=k["seg"], dur=round((j - i) * TICK, 1), mph=round(k["v"] * MPH),
-        gap_s=round(t_equiv(k), 2) if good_lead(k) else None, vrel=round(k["vrel"], 1) if good_lead(k) else None,
+        gap_s=round(t_equiv(k), 2) if good_lead(k) else None, real_s=round(real_gap(k), 2) if good_lead(k) else None,
+        vrel=round(k["vrel"], 1) if good_lead(k) else None,
         planner_a=round(prev["a_target"], 2) if prev["a_target"] is not None else None,
         driver_max_a=round(max(x["a"] for x in seg), 2),
         gap_s_end=round(t_equiv(ticks[j]), 2) if good_lead(ticks[j]) else None, same_lead=ok))
@@ -248,8 +254,8 @@ def analyze(route, ticks):
       ok = good_lead(k) and same_lead_window(ticks, i - W, i)
       out["brake_takeovers"].append(dict(
         t=round(k["t"], 1), seg=k["seg"], mph=round(k["v"] * MPH),
-        gap_s=round(t_equiv(k), 2) if good_lead(k) else None, vrel=round(k["vrel"], 1) if good_lead(k) else None,
-        ttc=round(ttc(k), 1) if good_lead(k) and ttc(k) else None,
+        gap_s=round(t_equiv(k), 2) if good_lead(k) else None, real_s=round(real_gap(k), 2) if good_lead(k) else None,
+        vrel=round(k["vrel"], 1) if good_lead(k) else None, ttc=round(ttc(k), 1) if good_lead(k) and ttc(k) else None,
         planner_a=round(prev["a_target"], 2) if prev["a_target"] is not None else None,
         driver_min_a=round(min(after), 2), fcw_before=any(x["plan_fcw"] for x in ticks[max(0, i - W):i]), same_lead=ok,
         personality=prev["personality"]))
@@ -298,7 +304,7 @@ def pcm_brake_threshold(pcm_brake):
 def summary(tot):
   L = [f"routes {len(tot['routes'])}, {tot['seconds'] / 60:.0f} min; time by mode (min): "
        + ", ".join(f"{m} {s / 60:.0f}" for m, s in sorted(tot["mode_seconds"].items()))]
-  L.append("steady following gap as sunnypilot t_follow (s): median [p25-p75] (samples)")
+  L.append("steady following gap, real (distance / speed, s): median [p25-p75] (samples)")
   for md in ["manual", "manual_lat"] + sorted(m for m in tot["steady_gap"] if m.startswith("engaged")):
     bins = tot["steady_gap"].get(md, {})
     row = []

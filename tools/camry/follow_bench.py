@@ -39,8 +39,15 @@ TUNES = {
   "stock 1.25":     ([0], [1.25]),
   "PR7 1.0":        ([40, 60], [1.0, 1.45]),
   "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
-  "flat 1.1":       ([0], [1.1]),
+  "flat 1.1":       ([35, 40, 60], [1.1, 1.1, 1.1]),   # PR #9 as first proposed (crashes at 3.5 m/s2 from 60 mph)
+  "1.1 to 1.45":    ([35, 40, 60], [1.1, 1.1, 1.45]),  # the fallback that passed the gate (2026-10-28)
+  "1.1 to 1.2":     ([35, 40, 60], [1.1, 1.1, 1.2]),   # PR #9's table read as t_follow (real gaps about 1.42-1.48 s)
+  "real 1.1 to 1.2": ([35, 40, 60], [1.1, 1.1, 1.2]),  # the default table as REAL gaps (2026-10-29): t_follow 0.72/0.76/0.98
 }
+# tunes whose values are REAL gaps (distance / speed, 6 m stop distance included), converted like the car does
+# (cp.t_follow_for_gap); every other tune is a plain t_follow table, as the code before 2026-10-29 read it. Tunes from a
+# settings file (--table, --gate) are real: that is how the code under test reads the file.
+REAL = {"real 1.1 to 1.2"}
 # settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have both on)
 OFF = cp.PersonalizedSettings(glide=False, soft_plan=False, approach=False, overspeed_glide_mph=0.0)   # the plain planner
 GLIDE = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=False)
@@ -51,7 +58,8 @@ SETTINGS = {
   "0.8 + glide":    (TUNES["0.8 to 35"], replace(GLIDE, overspeed_glide_mph=0.0, approach=False)),
   "0.8 + glide+soft": (TUNES["0.8 to 35"], PR8),
   "0.8 + all":      (TUNES["0.8 to 35"], DEFAULTS),   # PR #8 plus glide over set speed and the approach taper (the defaults)
-  "1.1 + all":      (TUNES["flat 1.1"], DEFAULTS),
+  "real + glide+soft": (TUNES["real 1.1 to 1.2"], PR8),   # the real-gap default with PR #8 behavior
+  "real + all":     (TUNES["real 1.1 to 1.2"], DEFAULTS),  # what the car runs after this change, with no settings file
   "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
   "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
@@ -62,9 +70,10 @@ TUNES["standard"] = TUNES["stock 1.25"]
 TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
+REAL |= {"real + glide+soft", "real + all"}
 # GLIDE CHECK: each glide tune against the same gaps without glide
-BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft", "1.1 + all": "flat 1.1",
-           "standard + defaults": "standard",
+BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft",
+           "real + glide+soft": "real 1.1 to 1.2", "real + all": "real + glide+soft", "standard + defaults": "standard",
            "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
 CUR_PERSONALITY = [AGG]
@@ -77,6 +86,7 @@ def add_table_tune(path, name="file"):
   bp, vals = cp.follow_table_ms(cp.PersonalizedSettings(**{**st.__dict__, "personalized": True}))
   TUNES[name] = ([b / MPH for b in bp], list(vals))
   SETTINGS[name] = (TUNES[name], st)
+  REAL.add(name)
 
 
 class FakeRk:
@@ -107,12 +117,14 @@ def _update(self, *a, **k):
 long_mpc.LongitudinalMpc.update = _update
 
 
-def set_tune(bp_mph, vals, settings=None, personality=AGG):
+def set_tune(bp_mph, vals, settings=None, personality=AGG, real=False):
   bp = [b * MPH for b in bp_mph]
   stock = long_mpc.get_T_FOLLOW
   def t_follow(personality=log.LongitudinalPersonality.standard, v_ego=None, personalized=None):
     if personality == AGG:
-      return float(np.interp(CUR_V[0] if v_ego is None else v_ego, bp, vals))
+      v = CUR_V[0] if v_ego is None else v_ego
+      g = float(np.interp(v, bp, vals))
+      return cp.t_follow_for_gap(g, v) if real else g
     return stock(personality)
   long_mpc.get_T_FOLLOW = t_follow
   # the planner's own copy of the table (long_mpc.update reads self.personalized) and the glide settings
@@ -371,7 +383,7 @@ def job(args):
   name, idx = args
   bp, vals = TUNES[name]
   # each worker process gets its own copy of the patched module
-  set_tune(bp, vals, SETTINGS[name][1] if name in SETTINGS else None, PERSONALITIES.get(name, AGG))
+  set_tune(bp, vals, SETTINGS[name][1] if name in SETTINGS else None, PERSONALITIES.get(name, AGG), name in REAL)
   sc = scenarios()
   if idx < len(sc):
     title, prof, v0, d0, dur = sc[idx]

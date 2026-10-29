@@ -21,6 +21,9 @@ MIN_EVENTS_SAFETY = 2    # brake takeovers at/under the target gap: suggest soon
 TTC_LATE_S = 15.0        # brake takeovers with a longer time to collision than this aren't about closing speed
 MIN_STEADY = 30          # steady-gap samples per speed bin before the manual gap counts
 STEP_S = 0.05            # s, one step on the follow table (Apply allows up to 0.1)
+# the learner never suggests a gap closer than this: the driver chose 1.1 s in town so cars don't cut in, and
+# let the learner move it down to 1.0 s (2026-10-25), even though the driver follows closer when driving manually
+LEARN_MIN_FOLLOW_S = 1.0
 # driver_profile speed bins -> the follow table point they inform (mph)
 BIN_TO_BP = {"20-35": 35, "35-50": 40, "50-65": 60, "65-+": 60}
 # soft plan strength (soft_distance_factor): firmer after brake takeovers inside the glide band, softer after a long
@@ -51,6 +54,19 @@ def follow_table(settings):
   return [round(b * MPH) for b in bp], list(vals)
 
 
+def real_of(e):
+  """An event's real gap (distance / speed, what the follow table means); profiles from before real_s have only the
+  t_follow-style gap_s, which is the real gap minus 6 m / speed."""
+  if e.get("real_s") is not None:
+    return e["real_s"]
+  return None if e.get("gap_s") is None else e["gap_s"] + cp.STOP_DISTANCE / max(e["mph"] / MPH, 0.1)
+
+
+def target_tf(mph, bp_mph, vals):
+  """The planner's t_follow at mph for the real-gap table: what an event's t_follow-style gap_s is measured against."""
+  return cp.t_follow_for_gap(float(np.interp(mph, bp_mph, vals)), mph / MPH)
+
+
 def suggest_follow(tot, settings):
   """One change for the follow table, from gas overrides (closer), brake takeovers (farther) and manual steady gaps."""
   bp_mph, vals = follow_table(settings)
@@ -59,12 +75,12 @@ def suggest_follow(tot, settings):
   gas = defaultdict(list)
   brake = defaultdict(list)
   for e in tot.get("gas_overrides", []):
-    if e.get("same_lead") and e.get("gap_s") is not None and e.get("vrel", 0) is not None and e["vrel"] > -1.0:
-      gas[bin_of(e["mph"])].append(e["gap_s"])
+    if e.get("same_lead") and real_of(e) is not None and e.get("vrel", 0) is not None and e["vrel"] > -1.0:
+      gas[bin_of(e["mph"])].append(real_of(e))
   for e in tot.get("brake_takeovers", []):
     # only takeovers at or under the table's gap count as "too close"; farther ones are late braking (see min_ttc_s)
-    if e.get("same_lead") and e.get("gap_s") is not None and e["gap_s"] <= float(np.interp(e["mph"], bp_mph, vals)) + 0.1:
-      brake[bin_of(e["mph"])].append(e["gap_s"])
+    if e.get("same_lead") and real_of(e) is not None and real_of(e) <= float(np.interp(e["mph"], bp_mph, vals)) + 0.1:
+      brake[bin_of(e["mph"])].append(real_of(e))
   manual = tot.get("steady_gap", {}).get("manual", {})
   for b, bp in BIN_TO_BP.items():
     if bp not in bp_mph:
@@ -82,7 +98,9 @@ def suggest_follow(tot, settings):
       if abs(med - vals[i]) >= STEP_S:
         new[i] = vals[i] + (STEP_S if med > vals[i] else -STEP_S)
         why.append(f"you follow at {med:.2f} s manually at {b} mph ({len(man)} samples)")
-  new = [round(min(max(v, cp.MIN_FOLLOW_S), cp.MAX_FOLLOW_S), 2) for v in new]
+  if any(v < LEARN_MIN_FOLLOW_S for v in vals):
+    why.append(f"under the {LEARN_MIN_FOLLOW_S:.1f} s learning floor you chose: farther")
+  new = [round(min(max(v, LEARN_MIN_FOLLOW_S), cp.MAX_FOLLOW_S), 2) for v in new]
   if new == [round(v, 2) for v in vals]:
     return None
   return dict(field="follow_s", bp_mph=bp_mph, to=new, why="; ".join(why), **{"from": [round(v, 2) for v in vals]})
@@ -97,8 +115,7 @@ def suggest_glide(tot, settings):
     # how far under the profile's target gap the driver lifts off, and where he finally brakes
     under = []
     for c in coasts:
-      target = float(np.interp(c["mph"], bp_mph, vals))
-      under.append(target - c["gap_s"])
+      under.append(target_tf(c["mph"], bp_mph, vals) - c["gap_s"])   # both in t_follow terms, like the glide bands
     margin = round(min(max(pct(under, 50), cp.LIMITS["coast_margin_s"][0]), cp.LIMITS["coast_margin_s"][1]), 2)
     if abs(margin - settings.coast_margin_s) >= 0.05:
       out.append(dict(field="coast_margin_s", to=margin, why=f"{len(coasts)} coasts, lift-off {pct(under, 50):.2f} s under target",
@@ -146,7 +163,7 @@ def suggest_soft(tot, settings):
   for e in tot.get("brake_takeovers", []):
     if not (e.get("same_lead") and e.get("gap_s") is not None):
       continue
-    tf = STOCK_T_FOLLOW.get(e.get("personality")) or float(np.interp(e["mph"], bp_mph, vals))
+    tf = STOCK_T_FOLLOW.get(e.get("personality")) or target_tf(e["mph"], bp_mph, vals)
     coast_to = tf - settings.coast_margin_s
     if coast_to - settings.light_width_s - 0.05 <= e["gap_s"] <= coast_to + 0.05:
       in_band.append(e["gap_s"])

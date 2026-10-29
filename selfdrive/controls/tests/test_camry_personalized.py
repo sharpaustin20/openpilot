@@ -170,7 +170,7 @@ class TestApplyRevert:
                        {"field": "min_ttc_s", "to": "x"}, {"field": "personalized", "to": False}]}
     new = cp.apply_suggested(sug, cur)
     assert new.follow_bp_mph == (35.0, 40.0, 60.0)
-    assert new.follow_s == (0.8, 1.1, 1.5)            # 0.8 floor, then at most +0.1 per point from the default table
+    assert new.follow_s == (1.0, 1.2, 1.3)            # at most 0.1 per point from the default table
     assert new.light_brake == -1.0 and new.coast_accel == -0.1 and new.min_ttc_s == 6.0 and new.personalized
 
   def test_apply_ignores_mismatched_breakpoints(self):
@@ -274,6 +274,25 @@ class TestSuggestionGate:
     offered, dropped, gate, _ = sl.gate_in_groups(self.CUR, self.CHANGES, self.FULL, lambda *a: {"verdict": "fail", "worse": ["x: crash"]})
     assert offered == [] and gate is self.FULL and [c["field"] for c in dropped] == ["coast_margin_s", "min_ttc_s", "follow_s"]
     assert all(c["dropped"] == "the bench showed: x: crash" for c in dropped)
+
+
+class TestFollowFloor:
+  """suggest_long.suggest_follow: the learner moves the 1.1 s town default, but never suggests closer than 1.0 s."""
+  GAS = {"gas_overrides": [{"mph": 25, "gap_s": 0.9, "vrel": 0.0, "same_lead": True}] * 6}
+
+  def test_default_table(self):
+    assert cp.DEFAULT_FOLLOW_BP_MPH == (35.0, 40.0, 60.0) and cp.DEFAULT_FOLLOW_S == (1.1, 1.1, 1.2)
+
+  def test_gas_presses_stop_at_the_floor(self):
+    from openpilot.tools.camry import suggest_long as sl
+    ch = sl.suggest_follow(self.GAS, PersonalizedSettings())
+    assert ch["to"] == [1.0, 1.1, 1.2] and ch["from"] == [1.1, 1.1, 1.2]
+    assert sl.suggest_follow(self.GAS, PersonalizedSettings(follow_bp_mph=(35.0, 40.0, 60.0), follow_s=(1.0, 1.1, 1.2))) is None
+
+  def test_below_the_floor_is_raised(self):
+    from openpilot.tools.camry import suggest_long as sl
+    ch = sl.suggest_follow({}, PersonalizedSettings(follow_bp_mph=(35.0, 40.0, 60.0), follow_s=(0.8, 1.0, 1.45)))
+    assert ch["to"] == [1.0, 1.0, 1.45] and "floor" in ch["why"]
 
 
 class TestOverspeed:
@@ -411,8 +430,10 @@ class TestSuggestionRanges:
 
   @staticmethod
   def _coasts(under_s, decel, end="coast", n=5):
-    # Personalized table at 50 mph is 0.8/1.0/1.45 interpolated: about 1.225 s
-    return [{"mph": 50.0, "gap_s": 1.225 - under_s, "end_gap_s": 1.225 - under_s - 0.02, "decel": decel, "end": end}
+    # Personalized table at 50 mph is 0.8/1.0/1.45 interpolated: about 1.225 s real, so the planner's t_follow (what the
+    # coasts' gap_s is measured against) is that minus 6 m / speed
+    tf = cp.t_follow_for_gap(1.225, 50 * cp.MPH)
+    return [{"mph": 50.0, "gap_s": tf - under_s, "end_gap_s": tf - under_s - 0.02, "decel": decel, "end": end}
             for _ in range(n)]
 
   def test_values_stay_in_limits(self):
@@ -425,3 +446,63 @@ class TestSuggestionRanges:
     assert out["coast_margin_s"] == cp.LIMITS["coast_margin_s"][0]
     assert out["light_width_s"] == cp.LIMITS["light_width_s"][0]
     assert out["coast_accel"] == cp.LIMITS["coast_accel"][1]   # a near-zero coast decel is offered as the weakest allowed
+
+
+class TestRealGap:
+  """The Personalized table is the real gap (distance / speed, the MPC's 6 m stop distance included); the planner's
+  t_follow is the gap minus 6 m / speed, never under MIN_T_FOLLOW (the driver, 2026-10-29: "I want to set the real gap")."""
+
+  def test_steady_distance_is_the_real_gap(self):
+    for mph, gap in ((45, 1.1), (60, 1.2), (70, 1.2)):
+      v = mph * cp.MPH
+      t = cp.t_follow_for_gap(gap, v)
+      assert t > cp.MIN_T_FOLLOW
+      assert (t * v + cp.STOP_DISTANCE) / v == pytest.approx(gap)
+
+  def test_floor_at_low_speed(self):
+    v = 30 * cp.MPH
+    assert cp.t_follow_for_gap(1.1, v) == cp.MIN_T_FOLLOW
+    assert (cp.MIN_T_FOLLOW * v + cp.STOP_DISTANCE) / v > 1.1   # a little farther than the table there, never closer
+    assert cp.t_follow_for_gap(1.1, 0.0) == cp.MIN_T_FOLLOW
+
+  def test_default_table_t_follow(self):
+    bp, vals = cp.follow_table_ms(PersonalizedSettings())
+    got = [cp.t_follow_for_gap(float(np.interp(b, bp, vals)), b) for b in bp]
+    assert got == pytest.approx([1.1 - 6 / (35 * cp.MPH), 1.1 - 6 / (40 * cp.MPH), 1.2 - 6 / (60 * cp.MPH)])   # 0.72, 0.76, 0.98
+
+  def test_learner_compares_real_gaps(self):
+    from openpilot.tools.camry import suggest_long as sl
+    # brake takeovers at 45 mph count as "too close" for the 1.1 s table at 1.15 s real, not at 1.3 s real
+    close = {"brake_takeovers": [{"mph": 45, "gap_s": 0.85, "real_s": 1.15, "same_lead": True}] * 2}
+    far = {"brake_takeovers": [{"mph": 45, "gap_s": 1.0, "real_s": 1.3, "same_lead": True}] * 2}
+    assert sl.suggest_follow(close, PersonalizedSettings())["to"] == [1.1, 1.15, 1.2]
+    assert sl.suggest_follow(far, PersonalizedSettings()) is None
+    # a profile from before real_s: the real gap is gap_s plus 6 m / speed
+    assert sl.real_of({"mph": 45, "gap_s": 0.85}) == pytest.approx(0.85 + 6 / (45 / sl.MPH))
+
+  def test_review_reads_real_gap_commits(self):
+    from openpilot.tools.camry import drive_review as dr
+    table = ([35 / dr.MPH, 40 / dr.MPH, 60 / dr.MPH], [1.1, 1.1, 1.2])
+    v = 60 / dr.MPH
+    assert dr.t_follow(0, v, table, real=True, floor=0.7) == pytest.approx(1.2 - 6 / v)
+    assert dr.t_follow(0, v, table) == pytest.approx(1.2)   # code from before the real gap: the table was t_follow
+    assert dr.t_follow(1, v, table, real=True, floor=0.7) == 1.45   # Standard keeps its stock t_follow
+
+
+class TestModeName:
+  """The distance-button popup ("Driving Personality: ...") names the Aggressive slot like Settings does."""
+
+  def test_names(self, tmp_path):
+    on, off = str(tmp_path / "on.json"), str(tmp_path / "off.json")
+    write_settings(PersonalizedSettings(personalized=True), on)
+    write_settings(PersonalizedSettings(personalized=False), off)
+    assert cp.mode_name("aggressive", on) == "Personalized"
+    assert cp.mode_name("aggressive", off) == "Aggressive"
+    assert cp.mode_name("standard", on) == "Standard"
+    assert cp.mode_name("relaxed", on) == "Relaxed"
+    assert cp.mode_name("aggressive", str(tmp_path / "missing.json")) == "Personalized"   # no file = the defaults (on)
+
+  def test_broken_file_never_raises(self, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert cp.mode_name("aggressive", str(bad)) == "Personalized"
