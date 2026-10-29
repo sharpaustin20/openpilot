@@ -37,13 +37,15 @@ except Exception:   # PR #8 not installed on this device: its first default tabl
 
 def defaults_for_commit(commit, repo="/data/openpilot"):
   """The default Personalized table in the code a route ran (git show of that commit), so a review run from another
-  tree (an overlay with other defaults) still compares each drive with the gaps it actually had. None if unknown."""
+  tree (an overlay with other defaults) still compares each drive with the gaps it actually had, plus how that code
+  read the table: (table or None, real, floor). real: the values are real gaps (distance / speed) that the planner
+  converts to t_follow with a floor (t_follow_for_gap); before that they were t_follow."""
   if not commit:
-    return None
+    return None, False, 0.0
   if commit not in _DEFAULTS_CACHE:
     import re
     import subprocess
-    table = None
+    table, real, floor = None, False, 0.0
     try:
       src = subprocess.run(["git", "-C", repo, "show", f"{commit}:selfdrive/controls/lib/camry_personalized.py"],
                            capture_output=True, text=True, timeout=20, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0")).stdout
@@ -51,9 +53,12 @@ def defaults_for_commit(commit, repo="/data/openpilot"):
       vals = re.search(r"^DEFAULT_FOLLOW_S\s*=\s*\(([^)]*)\)", src, re.M)
       if bp and vals:
         table = ([float(x) / MPH for x in bp.group(1).split(",") if x.strip()], [float(x) for x in vals.group(1).split(",") if x.strip()])
+      real = "def t_follow_for_gap" in src
+      fl = re.search(r"^MIN_T_FOLLOW\s*=\s*([0-9.]+)", src, re.M)
+      floor = float(fl.group(1)) if fl else 0.0
     except Exception:
       pass
-    _DEFAULTS_CACHE[commit] = table
+    _DEFAULTS_CACHE[commit] = (table, real, floor)
   return _DEFAULTS_CACHE[commit]
 
 
@@ -61,11 +66,12 @@ _DEFAULTS_CACHE: dict = {}
 
 
 def personalized_table(pers_line, commit=None):
-  """The Personalized gap table (m/s breakpoints, s) a route ran with, from its 'camry personalized settings' log line
-  (an override there wins), else the default of the code that ran (commit), else this tree's default; None when PR #8
-  was not running."""
+  """(table, real, floor): the Personalized gap table (m/s breakpoints, s) a route ran with, from its 'camry personalized
+  settings' log line (an override there wins), else the default of the code that ran (commit), else this tree's
+  default, and how that code read it (see defaults_for_commit); table None when PR #8 was not running."""
+  default, real, floor = defaults_for_commit(commit)
   if not pers_line:
-    return None
+    return None, real, floor
   try:
     msg = json.loads(pers_line).get("msg", pers_line)
   except Exception:
@@ -73,10 +79,10 @@ def personalized_table(pers_line, commit=None):
   try:
     st = ast.literal_eval(msg.split("settings: ", 1)[1].strip())
     if st.get("follow_bp_mph") and st.get("follow_s"):
-      return [b / MPH for b in st["follow_bp_mph"]], list(st["follow_s"])
+      return ([b / MPH for b in st["follow_bp_mph"]], list(st["follow_s"])), real, floor
   except Exception:
     pass
-  return defaults_for_commit(commit) or PR8_DEFAULT
+  return default or PR8_DEFAULT, real, floor
 
 
 def onroad():
@@ -159,13 +165,15 @@ def read_segment(path):
   return git, branch, pers, ticks, ev
 
 
-def t_follow(personality, v, table):
+def t_follow(personality, v, table, real=False, floor=0.0):
+  """The planner's t_follow (gap excluding the 6 m stop distance) for this personality and speed."""
   if personality == 2:
     return 1.75
   if personality == 1:
     return 1.45
   bp, vals = table or PR7
-  return float(np.interp(v, bp, vals))
+  g = float(np.interp(v, bp, vals))
+  return max(g - STOP_DISTANCE / max(v, 0.1), floor) if real and table else g
 
 
 def episodes(mask, t, max_gap=1.0):
@@ -235,8 +243,8 @@ def main():
       events["glide_fail"] += [(x + shift, msg) for x, msg in r["glide_fail"]]
       spans.append((n, offset, B[-1, 0]))
       commit = sorted(r["code"])[0].split()[0] if r["code"] else None
-      table = personalized_table(r["pr8"], commit)
-      tf = [[t_follow(int(p), v, table)] for p, v in zip(B[:, 17], B[:, 1], strict=True)]   # the route's own target gaps
+      table, real, floor = personalized_table(r["pr8"], commit)
+      tf = [[t_follow(int(p), v, table, real, floor)] for p, v in zip(B[:, 17], B[:, 1], strict=True)]   # the route's own targets
       blocks.append(np.hstack([B, np.full((len(B), 1), float(r["pr8"] is not None)), np.array(tf)]))
       offset = B[-1, 0] + 60.0
   if not blocks:
@@ -277,13 +285,15 @@ def main():
 
   # following
   fol = eng & (src == 1) & l_ok & (v > 2.0)
-  gap = (d_rel - STOP_DISTANCE) / np.maximum(v, 0.1)
-  print(f"\n== following (engaged, lead is the limiting source): {mmss(dt[fol].sum())}")
+  gap = (d_rel - STOP_DISTANCE) / np.maximum(v, 0.1)   # in the planner's t_follow terms, for the bands below
+  # every gap printed is the REAL gap (distance / speed, bumper to bumper, the 6 m stop distance included)
+  real, tf_real = d_rel / np.maximum(v, 0.1), tf + STOP_DISTANCE / np.maximum(v, 0.1)
+  print(f"\n== following (engaged, lead is the limiting source; real gaps = distance / speed): {mmss(dt[fol].sum())}")
   for lo, hi in BINS:
     m = fol & (v * MPH >= lo) & (v * MPH < hi)
     if dt[m].sum() > 10:
       brk_pct = dt[m & (a_tgt < -0.5)].sum() / max(dt[m].sum(), 0.01) * 100
-      print(f"  {lo:>2}-{hi:<3} mph: {mmss(dt[m].sum())}, gap median {np.median(gap[m]):.2f} s (target {np.median(tf[m]):.2f}), "
+      print(f"  {lo:>2}-{hi:<3} mph: {mmss(dt[m].sum())}, gap median {np.median(real[m]):.2f} s (target {np.median(tf_real[m]):.2f}), "
             + f"braking under -0.5: {brk_pct:.0f}% of the time")
   band = fol & (gap < tf) & (gap >= tf - 0.2) & (v_rel > -2.0)
   below = fol & (gap < tf - 0.2) & (gap >= tf - 0.45) & (v_rel > -2.0)
@@ -319,7 +329,7 @@ def main():
       else:
         why = "no lead"
       takeovers.append(dict(kind=kind, at=when(i), why=why, v_mph=round(float(v[i] * MPH), 1), v_min_20s_mph=round(v_min_after, 1),
-                            gap_s=None if gap_i is None else round(gap_i, 2), target_s=round(float(tf[i]), 2),
+                            gap_s=None if gap_i is None else round(float(real[i]), 2), target_s=round(float(tf_real[i]), 2),
                             closing_ms=round(closing, 1), min_a_3s=round(float(a_tgt[j0:i + 1].min()), 2),
                             source=PLAN_SRC.get(int(src[i]), "?")))
   if takeovers:
@@ -344,7 +354,7 @@ def main():
     if not l_ok[i0:k + 1].all() or (np.abs(np.diff(d_rel[i0:k + 1])) >= 4.0).any():
       continue
     runups.append(dict(at=when(i0), v_mph=round(float(v[i1] * MPH), 1), peak_a=round(float(a_tgt[i0:i1 + 1].max()), 2),
-                       gap_s=round(float(gap[i1]), 2), target_s=round(float(tf[i1]), 2), closing_ms=round(float(-v_rel[i1]), 1),
+                       gap_s=round(float(real[i1]), 2), target_s=round(float(tf_real[i1]), 2), closing_ms=round(float(-v_rel[i1]), 1),
                        brake_after_s=round(float(t[k] - t[i1]), 1), min_a=round(float(a_tgt[k:j1].min()), 2)))
   print(f"  run-ups (accelerating behind a lead, then braking under -0.5 within {RUNUP_S:.0f} s): {len(runups)}")
   for r in runups[:8]:

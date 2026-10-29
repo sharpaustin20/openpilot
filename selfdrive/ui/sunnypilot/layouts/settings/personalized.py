@@ -151,7 +151,8 @@ class PersonalizedLayout(Widget):
     for field, title, desc in (
       ("personalized", "Personalized Profile",
        "Your gap table in the Aggressive position of the distance button: Personalized, Standard, Relaxed. On by default; " +
-       "off = stock Aggressive (flat 1.25 s gap). Changes here apply at the next drive; only switching Glide, Soft Plan or Ease Into The Gap " +
+       "off = stock Aggressive (1.25 s plus the 6 m buffer: about 1.5 s real at 60 mph). Changes here apply at the next drive; " +
+       "only switching Glide, Soft Plan or Ease Into The Gap " +
        "off applies right away."),
       ("glide", "Glide",
        "In every distance mode: behind a lead, coast instead of braking while the gap is in the coast zone under that mode's target, " +
@@ -177,8 +178,9 @@ class PersonalizedLayout(Widget):
     items = [
       self._toggles["personalized"],
       text_item(lambda: tr("Follow Gap"), self._follow_text,
-                description=lambda: tr("Gap in seconds by speed. The default is 1.1 s up to 40 mph, 1.2 s at 60 mph and up; Apply below can tune it " +
-                                       "(the learner never suggests closer than 1.0 s).")),
+                description=lambda: tr("Real gap to the car ahead by speed: distance divided by speed, bumper to bumper (the planner's " +
+                                       "6 m stop buffer included). The default is 1.1 s up to 40 mph, 1.2 s at 60 mph and up; " +
+                                       "Apply below can tune it (the learner never suggests closer than 1.0 s).")),
       self._toggles["glide"],
       self._number("coast_margin_s", "Coast Zone Starts", "How far under the target gap coasting is allowed to start (relative band)."),
       self._number("light_width_s", "Light-Brake Zone Width",

@@ -4,8 +4,10 @@ every distance mode.
 
 Everything is set in /data/camry_long.json (the Personalized page) and tuned over time from the
 learning job's suggestions:
-- Personalized (on by default): a speed-based t_follow table (DEFAULT_FOLLOW_* below) for the
-  Aggressive slot; off = stock Aggressive (flat 1.25 s). Standard and Relaxed keep their stock gaps.
+- Personalized (on by default): a speed-based table of REAL gaps (DEFAULT_FOLLOW_* below) for the
+  Aggressive slot: bumper-to-bumper time to the lead, distance / speed, with the MPC's 6 m stop distance
+  included (t_follow_for_gap converts it); off = stock Aggressive (flat 1.25 s t_follow). Standard and
+  Relaxed keep their stock gaps.
 - glide (option A, on by default, every mode): the MPC penalizes being too close as much as being too
   far, so it brakes to win back every bit of gap. Behind a lead in the same lane, glide raises small
   braking requests to the car's coast decel while the gap is in a coast zone under the current mode's
@@ -45,14 +47,17 @@ from openpilot.system.hardware import PC
 from openpilot.system.hardware.hw import Paths
 
 MPH = 0.44704
-# default Personalized follow-gap table (mph, s); long_mpc.py uses it in m/s. 1.1 s up to 40 mph (the driver's choice,
-# so cars don't cut in), blending to 1.2 s at 60 mph and up (the driver's choice, 2026-10-28: 1.45 s held back on the
-# highway and made them press the gas). Flat 1.1 s crashed on the bench when a lead brakes at 3.5 m/s2 from 60 mph to
-# a stop; 1.25 s and 1.45 s stop in time. Each point can still be moved by the learner.
+# default Personalized follow-gap table (mph, s); long_mpc.py uses it in m/s. The values are REAL gaps (the driver's
+# choice, 2026-10-29: "I want to set the real gap"): distance to the lead / speed, the MPC's 6 m stop distance included,
+# so the planner's t_follow is the gap minus 6 m / speed (t_follow_for_gap). 1.1 s up to 40 mph (so cars don't cut in),
+# blending to 1.2 s at 60 mph and up (2026-10-28: more held back on the highway and made them press the gas). Each
+# point can still be moved by the learner.
 DEFAULT_FOLLOW_BP_MPH = (35.0, 40.0, 60.0)
 DEFAULT_FOLLOW_S = (1.1, 1.1, 1.2)
 STOP_DISTANCE = 6.0         # m, long_mpc.py: steady-state gap = t_follow * v + STOP_DISTANCE
-MIN_FOLLOW_S = 0.8          # s, follow-gap table limits
+MIN_T_FOLLOW = 0.7          # s, the planner's t_follow never goes under this: below ~34 mph a 1.1 s real gap would need
+                            # less, so there the real gap ends up a little longer than the table (1.15 s at 30 mph)
+MIN_FOLLOW_S = 0.8          # s, follow-gap table limits (real gaps)
 MAX_FOLLOW_S = 1.75
 MAX_FOLLOW_BP_MPH = 40.0 / MPH  # 40 m/s
 MAX_FOLLOW_POINTS = 6
@@ -291,9 +296,15 @@ def history_count(hist: str | None = None) -> int:
     return 0
 
 
+def t_follow_for_gap(gap_s: float, v_ego: float) -> float:
+  """The MPC's t_follow that holds a REAL gap of gap_s (distance / speed) at v_ego: the MPC keeps
+  t_follow * v + STOP_DISTANCE, so t_follow = gap - STOP_DISTANCE / v, never under MIN_T_FOLLOW."""
+  return max(gap_s - STOP_DISTANCE / max(v_ego, 0.1), MIN_T_FOLLOW)
+
+
 def follow_table_ms(s: PersonalizedSettings):
-  """(breakpoints m/s, gaps s) for long_mpc.get_T_FOLLOW. None = Personalized off (stock Aggressive);
-  the default table when no override is set."""
+  """(breakpoints m/s, real gaps s) for long_mpc.get_T_FOLLOW, which converts them with t_follow_for_gap. None =
+  Personalized off (stock Aggressive); the default table when no override is set."""
   if not s.personalized:
     return None
   bp, vals = (s.follow_bp_mph, s.follow_s) if s.follow_bp_mph else (DEFAULT_FOLLOW_BP_MPH, DEFAULT_FOLLOW_S)

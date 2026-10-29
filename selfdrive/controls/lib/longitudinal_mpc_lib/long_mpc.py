@@ -73,12 +73,13 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
 
 # Camry Personalized profile (takes the Aggressive slot when switched on, see camry_personalized.py):
 # default table 1.1 s up to 40 mph (the driver's choice, so cars don't cut in), blending to 1.2 s at 60+ (also the
-# driver's choice). The Personalized page can override it with a learned table.
+# driver's choice). The values are real gaps (distance / speed, STOP_DISTANCE included), converted to t_follow here.
+# The Personalized page can override it with a learned table.
 PERSONALIZED_T_FOLLOW_BP = [b * camry_personalized.MPH for b in camry_personalized.DEFAULT_FOLLOW_BP_MPH]  # m/s
 PERSONALIZED_T_FOLLOW_V = list(camry_personalized.DEFAULT_FOLLOW_S)
 
 def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, v_ego=0.0, personalized=None):
-  """personalized: None = stock Aggressive, else the Personalized (breakpoints m/s, t_follow s) table."""
+  """personalized: None = stock Aggressive, else the Personalized (breakpoints m/s, real gap s) table."""
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.75
   elif personality==log.LongitudinalPersonality.standard:
@@ -86,7 +87,7 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, v_ego=0.0, pe
   elif personality==log.LongitudinalPersonality.aggressive:
     if personalized is None:
       return 1.25
-    return float(np.interp(v_ego, personalized[0], personalized[1]))
+    return camry_personalized.t_follow_for_gap(float(np.interp(v_ego, personalized[0], personalized[1])), v_ego)
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 

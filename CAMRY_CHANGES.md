@@ -61,22 +61,34 @@ Personal sunnypilot branch for one car:
      time are unchanged.
    - Fan page shows whether a test job is running and which cores are online.
 
-4. **Personalized follow gap** (`selfdrive/controls/lib/camry_personalized.py`, `long_mpc.py`)
-   - Stock Aggressive is a flat 1.25 s gap. The Personalized profile (item 5)
-     in the Aggressive slot defaults to 1.1 s up to 40 mph, the driver's
-     choice (2026-10-25): far enough that cars don't cut in. It blends to
-     1.2 s at 60 mph and up (the driver's choice, 2026-10-28: a longer
-     highway gap held back and made them press the gas). The learner can
-     move each of the three points (35, 40, 60 mph) on its own, never
-     closer than 1.0 s (`tools/camry/suggest_long.py` `LEARN_MIN_FOLLOW_S`,
-     also the driver's choice).
-   - History: PR #7 used 1.0 s up to 40 mph blending to 1.45 s at 60+;
-     PR #8 used 0.8 s up to 35 mph, 1.0 s at 40, 1.45 s at 60+. A flat
-     1.1 s was tried first for PR #9 and crashed on the bench when a lead
-     brakes at 3.5 m/s² from 60 mph to a stop (1.25 s and 1.45 s stop in
-     time).
-   - Standard and Relaxed are unchanged. Checked with
-     `tools/camry/follow_bench.py` (real planner vs. simulated leads).
+4. **Personalized follow gap: real gaps** (`selfdrive/controls/lib/camry_personalized.py`, `long_mpc.py`)
+   - Every gap here is the REAL gap: distance to the car ahead divided by
+     speed, bumper to bumper (the driver's choice, 2026-10-29: "I want to
+     set the real gap"). The planner itself keeps t_follow × speed + 6 m,
+     so `t_follow_for_gap` converts: t_follow = gap - 6 m / speed, never
+     under `MIN_T_FOLLOW` 0.7 s (below about 34 mph a 1.1 s real gap
+     would need less, so there the gap ends up a little longer, 1.15 s at
+     30 mph). Before this change the table was t_follow, so the 6 m came
+     on top: PR #8's table felt like 1.2 s in town and 1.6 s at 55 mph.
+   - The Personalized profile (item 5) in the Aggressive slot defaults to
+     1.1 s up to 40 mph, the driver's choice (2026-10-25): far enough that
+     cars don't cut in. It blends to 1.2 s at 60 mph and up (2026-10-28: a
+     longer highway gap held back and made them press the gas). In t_follow
+     terms that is 0.72 s at 35 mph, 0.76 s at 40 and 0.98 s at 60, closer
+     than any table benched before. The learner can move each of the three
+     points (35, 40, 60 mph) on its own, comparing the driver's real gaps,
+     never closer than 1.0 s real (`tools/camry/suggest_long.py`
+     `LEARN_MIN_FOLLOW_S`, also the driver's choice).
+   - Stock Aggressive is a flat 1.25 s t_follow (about 1.5 s real at
+     60 mph). History, in t_follow: PR #7 used 1.0 s up to 40 mph blending
+     to 1.45 s at 60+; PR #8 used 0.8 s up to 35 mph, 1.0 s at 40, 1.45 s
+     at 60+. A flat 1.1 s t_follow (1.32 s real at 60 mph) crashed on the
+     bench when a lead brakes at 3.5 m/s² from 60 mph to a stop (1.25 s and
+     1.45 s stop in time).
+   - Standard and Relaxed are unchanged. `tools/camry/drive_review.py`
+     reports real gaps and targets. Checked with `tools/camry/follow_bench.py`
+     (real planner vs. simulated leads; tunes in `REAL` are converted the
+     way the car does).
 
 5. **Personalized profile: glide, soft plan, learning** (`selfdrive/controls/lib/camry_personalized.py`,
    `selfdrive/controls/lib/longitudinal_planner.py`, `long_mpc.py`, Settings > Personalized,

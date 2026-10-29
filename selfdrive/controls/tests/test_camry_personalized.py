@@ -430,8 +430,10 @@ class TestSuggestionRanges:
 
   @staticmethod
   def _coasts(under_s, decel, end="coast", n=5):
-    # Personalized table at 50 mph is 0.8/1.0/1.45 interpolated: about 1.225 s
-    return [{"mph": 50.0, "gap_s": 1.225 - under_s, "end_gap_s": 1.225 - under_s - 0.02, "decel": decel, "end": end}
+    # Personalized table at 50 mph is 0.8/1.0/1.45 interpolated: about 1.225 s real, so the planner's t_follow (what the
+    # coasts' gap_s is measured against) is that minus 6 m / speed
+    tf = cp.t_follow_for_gap(1.225, 50 * cp.MPH)
+    return [{"mph": 50.0, "gap_s": tf - under_s, "end_gap_s": tf - under_s - 0.02, "decel": decel, "end": end}
             for _ in range(n)]
 
   def test_values_stay_in_limits(self):
@@ -444,3 +446,44 @@ class TestSuggestionRanges:
     assert out["coast_margin_s"] == cp.LIMITS["coast_margin_s"][0]
     assert out["light_width_s"] == cp.LIMITS["light_width_s"][0]
     assert out["coast_accel"] == cp.LIMITS["coast_accel"][1]   # a near-zero coast decel is offered as the weakest allowed
+
+
+class TestRealGap:
+  """The Personalized table is the real gap (distance / speed, the MPC's 6 m stop distance included); the planner's
+  t_follow is the gap minus 6 m / speed, never under MIN_T_FOLLOW (the driver, 2026-10-29: "I want to set the real gap")."""
+
+  def test_steady_distance_is_the_real_gap(self):
+    for mph, gap in ((45, 1.1), (60, 1.2), (70, 1.2)):
+      v = mph * cp.MPH
+      t = cp.t_follow_for_gap(gap, v)
+      assert t > cp.MIN_T_FOLLOW
+      assert (t * v + cp.STOP_DISTANCE) / v == pytest.approx(gap)
+
+  def test_floor_at_low_speed(self):
+    v = 30 * cp.MPH
+    assert cp.t_follow_for_gap(1.1, v) == cp.MIN_T_FOLLOW
+    assert (cp.MIN_T_FOLLOW * v + cp.STOP_DISTANCE) / v > 1.1   # a little farther than the table there, never closer
+    assert cp.t_follow_for_gap(1.1, 0.0) == cp.MIN_T_FOLLOW
+
+  def test_default_table_t_follow(self):
+    bp, vals = cp.follow_table_ms(PersonalizedSettings())
+    got = [cp.t_follow_for_gap(float(np.interp(b, bp, vals)), b) for b in bp]
+    assert got == pytest.approx([1.1 - 6 / (35 * cp.MPH), 1.1 - 6 / (40 * cp.MPH), 1.2 - 6 / (60 * cp.MPH)])   # 0.72, 0.76, 0.98
+
+  def test_learner_compares_real_gaps(self):
+    from openpilot.tools.camry import suggest_long as sl
+    # brake takeovers at 45 mph count as "too close" for the 1.1 s table at 1.15 s real, not at 1.3 s real
+    close = {"brake_takeovers": [{"mph": 45, "gap_s": 0.85, "real_s": 1.15, "same_lead": True}] * 2}
+    far = {"brake_takeovers": [{"mph": 45, "gap_s": 1.0, "real_s": 1.3, "same_lead": True}] * 2}
+    assert sl.suggest_follow(close, PersonalizedSettings())["to"] == [1.1, 1.15, 1.2]
+    assert sl.suggest_follow(far, PersonalizedSettings()) is None
+    # a profile from before real_s: the real gap is gap_s plus 6 m / speed
+    assert sl.real_of({"mph": 45, "gap_s": 0.85}) == pytest.approx(0.85 + 6 / (45 / sl.MPH))
+
+  def test_review_reads_real_gap_commits(self):
+    from openpilot.tools.camry import drive_review as dr
+    table = ([35 / dr.MPH, 40 / dr.MPH, 60 / dr.MPH], [1.1, 1.1, 1.2])
+    v = 60 / dr.MPH
+    assert dr.t_follow(0, v, table, real=True, floor=0.7) == pytest.approx(1.2 - 6 / v)
+    assert dr.t_follow(0, v, table) == pytest.approx(1.2)   # code from before the real gap: the table was t_follow
+    assert dr.t_follow(1, v, table, real=True, floor=0.7) == 1.45   # Standard keeps its stock t_follow
