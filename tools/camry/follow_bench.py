@@ -257,7 +257,7 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   return dict(gap_m=d[0], expect_m=expect, gap_s=d[0] / max(v[0], 0.1), min_gap_m=d.min(), min_ttc=ttc.min(),
               min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4),
               brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, end_gap_s=d[-1] / max(v[-1], 0.1),
-              min_gap_s=d.min() / max(v[0], 0.1))
+              min_gap_s=d.min() / max(v[0], 0.1), min_gap_tf=(d.min() - long_mpc.STOP_DISTANCE) / max(v[0], 0.1))
 
 
 def scenarios():
@@ -335,7 +335,8 @@ def run_overspeed(v0_mph, cruise_profile, duration, pitch=0.0, lead=None):
   if lead is not None:
     closing = vl - v
     ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
-    res.update(min_gap_m=float(d.min()), min_gap_s=float(d.min() / max(v.max(), 0.1)), min_ttc=float(ttc.min()))
+    res.update(min_gap_m=float(d.min()), min_gap_s=float(d.min() / max(v.max(), 0.1)),
+               min_gap_tf=float((d.min() - long_mpc.STOP_DISTANCE) / max(v.max(), 0.1)), min_ttc=float(ttc.min()))
   return res
 
 
@@ -375,7 +376,8 @@ def run_approach(v_ego_mph, v_lead_mph, d0, cruise_mph, duration=60.0):
   ttc = np.where(closing < -0.3, d / np.maximum(-closing, 1e-3), np.inf)
   outside = np.flatnonzero(np.abs(d - expect) > 0.15 * expect + 1)
   under = max(0.0, expect - d.min())
-  return dict(min_gap_m=d.min(), min_gap_s=d.min() / max(v.max(), 0.1), expect_m=expect, under_m=under, under_s=under / max(vl, 0.1),
+  return dict(min_gap_m=d.min(), min_gap_s=d.min() / max(v.max(), 0.1), min_gap_tf=(d.min() - long_mpc.STOP_DISTANCE) / max(v.max(), 0.1),
+              expect_m=expect, under_m=under, under_s=under / max(vl, 0.1),
               peak_a=acc.max(), min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, brake_s=float((acc < BRAKE_A).sum() * DT),
               fcw=fcw, crash=bool(d.min() < 0.4), min_ttc=ttc.min(), glide_s=glide_s,
               settle_s=float((outside[-1] + 1) * DT) if len(outside) else 0.0)
@@ -450,7 +452,8 @@ def gate(cur_path, cand_path, modes=("personalized",)):
   slot and, with --modes all, in Standard and Relaxed too (glide and soft plan act there as well). PASS unless in some
   scenario of some mode the candidate has more FCW frames than the current (strict: the bench is deterministic, so even
   one more frame is an effect of the change, e.g. a closer gap, not noise), crashes where the current doesn't, brakes
-  harder than -2.5 where the current didn't, gets under HARD_MIN_GAP_S where the current didn't, or misses its steady
+  harder than -2.5 where the current didn't, gets under HARD_MIN_GAP_S where the current didn't (in planner terms, the real
+  gap minus 6 m / speed, the terms the glide floor itself is in; the min gaps printed are real), or misses its steady
   gap. suggest_long.py then benches the glide/soft plan changes and the gap table change separately on a fail. Prints
   a verdict line and a GATE_JSON line (read by suggest_long.py before a suggestion is offered or applied)."""
   import json
@@ -475,8 +478,10 @@ def gate(cur_path, cand_path, modes=("personalized",)):
         worse.append(f"{mode}, {k}: crash")
       if m["min_a"] < -2.5 <= b["min_a"]:
         worse.append(f"{mode}, {k}: decel {m['min_a']:.2f}")
-      if "min_gap_s" in m and m["min_gap_s"] < cp.HARD_MIN_GAP_S <= b.get("min_gap_s", 9.0):
-        worse.append(f"{mode}, {k}: min gap {m['min_gap_s']:.2f} s")
+      # the glide floor is in planner terms (real gap minus 6 m / speed), so the rule compares that, not the real gap
+      if "min_gap_tf" in m and m["min_gap_tf"] < cp.HARD_MIN_GAP_S <= b.get("min_gap_tf", 9.0):
+        worse.append(f"{mode}, {k}: min gap {m['min_gap_s']:.2f} s real, {m['min_gap_tf']:.2f} s in planner terms, under the "
+                     f"{cp.HARD_MIN_GAP_S} s glide floor")
       if k.startswith("steady") and abs(m["gap_m"] - m["expect_m"]) > 0.15 * m["expect_m"] + 1:
         worse.append(f"{mode}, {k}: steady gap {m['gap_m']:.0f} m, table {m['expect_m']:.0f} m")
       if k in OVERSPEED_TITLES and m.get("pitch", 0.0) == 0.0 and m.get("back_s") is None and b.get("back_s") is not None:
