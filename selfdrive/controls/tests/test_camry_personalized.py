@@ -637,6 +637,16 @@ class TestPlannerShaping:
     assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == cp.MPC_SHAPING_STOCK
     assert GlideGovernor(live=False, settings=s).mpc_shaping() == cp.MPC_SHAPING_STOCK
 
+  def test_assist_comfort_brake_only_while_assist_acts(self):
+    g = GlideGovernor(live=False, settings=PersonalizedSettings(assist_comfort_brake=1.5))
+    g.observe(26.8, lead(1.2, a_lead=-0.5), 1.0)
+    assert g.mpc_shaping() == cp.MPC_SHAPING_STOCK
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert g.assist and g.mpc_shaping() == (1.5, 0.0, 1.0, 1.0)
+    g = GlideGovernor(live=False, settings=PersonalizedSettings(assist_comfort_brake=2.5, mpc_comfort_brake=2.0))
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert g.mpc_shaping()[0] == 2.0   # never less cautious than without assist
+
   def test_settings_clamped(self):
     s = parse_settings({"mpc_comfort_brake": 0.5, "mpc_glide_band_s": 2.0, "mpc_glide_weight": 0.0, "mpc_far_weight": 5})
     assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == (1.5, 0.5, 0.05, 1.0)

@@ -80,6 +80,8 @@ SETTINGS = {
   "shape brake 1.5": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, mpc_comfort_brake=1.5)),
   "shape band":     (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, mpc_glide_band_s=0.3, mpc_glide_weight=0.2)),
   "shape far":      (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, mpc_far_weight=0.3)),
+  "assist brake 2.0": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, assist_comfort_brake=2.0)),   # only while brake assist acts
+  "assist brake 1.5": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, assist_comfort_brake=1.5)),
   "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
   "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
@@ -90,7 +92,7 @@ TUNES["standard"] = TUNES["stock 1.25"]
 TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
-SHAPE = {"shape brake 2.0", "shape brake 1.5", "shape band", "shape far"}
+SHAPE = {"shape brake 2.0", "shape brake 1.5", "shape band", "shape far", "assist brake 2.0", "assist brake 1.5"}
 ASSIST = {"real + assist", "real + assist tau", "real + assist ramp", "real + assist max", "real + assist quick", "real + assist firm"}
 REAL |= {"real + glide+soft", "real + all", "real, no assist"} | ASSIST | SHAPE
 # GLIDE CHECK: each glide tune against the same gaps without glide

@@ -109,6 +109,7 @@ class PersonalizedSettings:
   brake_assist: bool = True       # react sooner when the car ahead brakes hard (in every distance mode; bench 2026-10-29)
   lead_brake_tau: float = 0.3     # brake assist: how fast the planner expects the lead's braking to fade (stock radar lead 1.5, vision lead 0.3)
   brake_ramp: float = 0.25        # brake assist: scale on the planner's accel-change and jerk weights (1.0 = stock ramp)
+  assist_comfort_brake: float = 2.5  # brake assist: the planner's comfort brake while it acts (rebuilt solver only; 2.5 = stock)
   # planner shaping (in every distance mode); acts only with the rebuilt planner solver, the defaults are stock
   mpc_comfort_brake: float = 2.5  # m/s^2 the desired distance plans to brake with: lower = starts slowing earlier and gentler
   mpc_glide_band_s: float = 0.0   # s under the target gap the planner itself plans to coast (0 = off)
@@ -134,6 +135,7 @@ LIMITS = {
   "lead_brake_tau": (0.1, 1.5),
   "brake_ramp": (0.25, 1.0),
   "mpc_comfort_brake": (1.5, 3.0),
+  "assist_comfort_brake": (1.5, 3.0),
   "mpc_glide_band_s": (0.0, 0.5),
   "mpc_glide_weight": (0.05, 1.0),
   "mpc_far_weight": (0.1, 1.0),
@@ -538,9 +540,12 @@ class GlideGovernor:
     return self.settings.lead_brake_tau if self.assist else None
 
   def mpc_shaping(self) -> tuple:
-    """(comfort brake, glide band s, glide weight, far weight) for the rebuilt planner solver."""
+    """(comfort brake, glide band s, glide weight, far weight) for the rebuilt planner solver. While brake assist acts
+    the comfort brake is at most assist_comfort_brake: the planner plans to start braking earlier for a hard-braking lead
+    without changing how it follows or closes in otherwise."""
     s = self.settings
-    return s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight
+    comfort_brake = min(s.mpc_comfort_brake, s.assist_comfort_brake) if self.assist else s.mpc_comfort_brake
+    return comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight
 
   def apply(self, a_target: float, source_is_lead: bool, accel_min: float) -> float:
     """Returns the adjusted accel target: the approach taper can only lower a positive acceleration request (never
