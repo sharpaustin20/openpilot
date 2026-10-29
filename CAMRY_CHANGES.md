@@ -118,6 +118,13 @@ Personal sunnypilot branch for one car:
      bright for 4 s after each press of the wheel's distance button and at
      the start of a drive, dim otherwise
      (`selfdrive/ui/sunnypilot/onroad/driving_mode.py`).
+     The popup is stock openpilot: it only shows while engaged. A press now
+     sticks even when the disk is slow (`selfdrive/selfdrived/personality_hold.py`).
+     selfdrived re-reads the saved mode every 0.1 s, and on 2026-10-29 the
+     save took 0.16-2.7 s to land, so every press snapped back to the old
+     mode within 0.1 s and the "Personalized" popup never stayed. After a
+     press, selfdrived ignores the old saved value until the new one reads
+     back, for at most 20 s.
    - **Glide** (own toggle, on by default, in every distance mode): behind
      a lead in the same lane, small braking requests are raised to the
      car's coast decel while the gap is a little under the current mode's
