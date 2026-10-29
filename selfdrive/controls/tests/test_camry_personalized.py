@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -61,7 +62,8 @@ class TestSettings:
     s = PersonalizedSettings(personalized=True, glide=True, band=BAND_FIXED, light_brake=-0.6, follow_bp_mph=(40.0,), follow_s=(1.1,))
     write_settings(s, p)
     assert read_settings(p) == s
-    assert json.load(open(p))["glide"] is True
+    with open(p) as f:
+      assert json.load(f)["glide"] is True
 
 
 class TestFloor:
@@ -573,6 +575,17 @@ class TestBrakeAssist:
     write_settings(PersonalizedSettings(brake_assist=False, lead_brake_tau=0.5), path)
     g.refresh_settings(now=100.0)
     assert not g.settings.brake_assist and g.settings.lead_brake_tau == 0.3   # only the switch-off applies mid-drive
+
+  def test_switch_off_seen_when_mtime_unchanged(self, tmp_path):
+    # the comma's /tmp keeps coarse mtimes: two quick writes can share one
+    path = str(tmp_path / "camry_long.json")
+    write_settings(PersonalizedSettings(), path)
+    first = os.stat(path).st_mtime_ns
+    g = GlideGovernor(live=True, path=path)
+    write_settings(PersonalizedSettings(brake_assist=False), path)
+    os.utime(path, ns=(first, first))
+    g.refresh_settings(now=100.0)
+    assert not g.settings.brake_assist
 
   def test_on_while_lead_brakes_hard_then_holds(self):
     g = self.gov(brake_assist=True)

@@ -436,8 +436,10 @@ class GlideGovernor:
     self._closing_f = 0.0
 
   def _stat(self):
+    # write_settings replaces the file, so a new inode marks a change even when two writes share a coarse mtime tick
     try:
-      return os.stat(self.path or settings_path()).st_mtime_ns
+      st = os.stat(self.path or settings_path())
+      return st.st_ino, st.st_mtime_ns, st.st_size
     except OSError:
       return None
 
