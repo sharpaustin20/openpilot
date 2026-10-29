@@ -99,10 +99,11 @@ def main():
   kept = os.path.join(lib, "acados_ocp_solver_pyx.so.kept")
   shutil.copy2(wrapper, kept)
 
-  # 1. generate (long_mpc.py writes c_generated_code/ and acados_ocp_long.json next to itself; acados_template finds its
-  # t_renderer under ACADOS_SOURCE_DIR)
-  env = dict(os.environ, PYTHONPATH=tree, PYTHONDONTWRITEBYTECODE="1", TERA_PATH=tera[0])
-  env.setdefault("ACADOS_SOURCE_DIR", os.path.dirname(os.path.dirname(tera[0])))
+  # 1. generate (long_mpc.py writes c_generated_code/ and acados_ocp_long.json next to itself), with the same three
+  # paths openpilot's SConscript sets: the install root (include/, lib/, as the committed json has them), the
+  # acados_template package (its layout json and templates) and the renderer
+  env = dict(os.environ, PYTHONPATH=tree, PYTHONDONTWRITEBYTECODE="1", PWD=lib, TERA_PATH=tera[0],
+             ACADOS_SOURCE_DIR=os.path.join(base, "install"), ACADOS_PYTHON_INTERFACE_PATH=templates)
   print(f"t_renderer: {tera[0]}")
   run([sys.executable, "long_mpc.py"], cwd=lib, env=env)   # stdin closed: acados can't stop to ask for a download
   if not os.path.exists(wrapper):
