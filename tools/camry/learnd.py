@@ -9,7 +9,7 @@ Started by manager only while offroad (process_config.py). Every 10 s it checks,
   - in the car: battery above MIN_VOLTAGE_MV                      otherwise wait
   - device below START_TEMP_C                                    otherwise wait
   - there are drives it hasn't learned from yet                   otherwise idle
-Then it runs driver_profile.py + suggest_long.py through system/hardware/test_job.py (8 cores, testing fan curve)
+Then it runs driver_profile.py + suggest_long.py (and flag_review.py for the drives' flags) through system/hardware/test_job.py (8 cores, testing fan curve)
 at the lowest CPU priority, in its own process group. The job is killed at once if the car turns on, if the
 device passes STOP_TEMP_C, or when manager stops this process. It writes /data/camry_long_suggested.json and
 /data/camry_long_learned.json; the live settings change only if "Apply Automatically" is on (suggest_long.py then
@@ -126,8 +126,10 @@ class Learnd:
     wrapper = os.path.join(BASEDIR, "system", "hardware", "test_job.py")
     tools = os.path.join(BASEDIR, "tools", "camry")
     profile_out = "/tmp/camry_learn_profile.json"
-    script = (f"{py} {tools}/driver_profile.py --root {REALDATA} --out {profile_out} {' '.join(sorted(routes))} && "
-              f"{py} {tools}/suggest_long.py {profile_out} --history {self.history}")
+    script = (f"{py} {tools}/driver_profile.py --root {REALDATA} --out {profile_out} {' '.join(sorted(routes))} && " +
+              f"{py} {tools}/suggest_long.py {profile_out} --history {self.history} && " +
+              # the driver's flags from these drives, summarized for review (never fails the learning run)
+              f"{{ {py} {tools}/flag_review.py --root {REALDATA} {' '.join(sorted(routes))} || true; }}")
     cmd = [py, wrapper, "/bin/sh", "-c", script]
     env = dict(os.environ, PYTHONPATH=BASEDIR)
 

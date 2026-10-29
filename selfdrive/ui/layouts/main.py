@@ -61,6 +61,8 @@ class MainLayout(Widget):
     self._layouts[MainState.HOME].set_settings_callback(lambda: self.open_settings(PanelType.TOGGLES))
     self._layouts[MainState.SETTINGS].set_callbacks(on_close=self._set_mode_for_state)
 
+    self._layouts[MainState.ONROAD].set_flag_callback(self._on_bookmark_clicked)
+
     for layout in (self._layouts[MainState.ONROAD], self._home_body_layout):
       layout.set_click_callback(self._on_onroad_clicked)
 
