@@ -506,3 +506,234 @@ class TestModeName:
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
     assert cp.mode_name("aggressive", str(bad)) == "Personalized"
+
+
+@pytest.fixture
+def long_mpc_module(monkeypatch):
+  """long_mpc for unit tests of its Python side. Where the compiled solver or msgq isn't built (cloud), they are
+  stubbed for the import and the stubbed modules are dropped again afterwards."""
+  import sys
+  import types
+  try:
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib import long_mpc
+    yield long_mpc
+    return
+  except ImportError:
+    pass
+
+  class Stub(types.ModuleType):
+    def __getattr__(self, name):
+      return object
+  before = set(sys.modules)
+  stubs = ["cereal.messaging", "openpilot.common.params_pyx",
+           "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx"]
+  try:
+    import casadi  # noqa: F401  (pip-installable: the shaped cost is then checked for real)
+  except ImportError:
+    stubs.append("casadi")
+  for name in stubs:
+    monkeypatch.setitem(sys.modules, name, Stub(name))
+  import importlib
+  yield importlib.import_module("openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc")
+  for name in set(sys.modules) - before:   # nothing imported against the stubs outlives the test
+    sys.modules.pop(name, None)
+
+
+class TestBrakeAssist:
+  """React sooner when the car ahead brakes hard: the MPC expects the lead's braking to last (aLeadTau capped) and may
+  ramp its own braking faster (lower accel-change and jerk weights). Off by default; fails safe to stock."""
+
+  def gov(self, **kw):
+    return GlideGovernor(live=False, settings=PersonalizedSettings(**kw))
+
+  def test_on_by_default(self):
+    s = PersonalizedSettings()
+    assert s.brake_assist and (s.lead_brake_tau, s.brake_ramp) == (0.3, 0.25)   # "firm": passed the 2026-10-29 bench gate
+    g = self.gov(brake_assist=False)
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert not g.assist and g.mpc_ramp_factor() == 1.0 and g.lead_tau_cap() is None   # off: the stock planner
+
+  def test_off_in_relaxed(self):
+    from cereal import log
+    for relaxed in (log.LongitudinalPersonality.relaxed, "relaxed"):
+      g = self.gov()
+      g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0, relaxed)
+      assert not g.assist and g.lead_tau_cap() is None
+    for mode in (log.LongitudinalPersonality.aggressive, log.LongitudinalPersonality.standard, None):
+      g = self.gov()
+      g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0, mode)
+      assert g.assist
+
+  def test_switching_off_mid_drive_applies_right_away(self, tmp_path):
+    path = str(tmp_path / "camry_long.json")
+    write_settings(PersonalizedSettings(), path)
+    g = GlideGovernor(live=True, path=path)
+    g.refresh_settings(now=0.0)
+    assert g.settings.brake_assist
+    write_settings(PersonalizedSettings(brake_assist=False, lead_brake_tau=0.5), path)
+    g.refresh_settings(now=100.0)
+    assert not g.settings.brake_assist and g.settings.lead_brake_tau == 0.3   # only the switch-off applies mid-drive
+
+  def test_on_while_lead_brakes_hard_then_holds(self):
+    g = self.gov(brake_assist=True)
+    g.observe(26.8, lead(1.2, a_lead=-1.0), 1.0)
+    assert not g.assist   # ordinary slowing ahead: stock planner
+    g.observe(26.8, lead(1.2, a_lead=-2.0), 1.0)
+    assert g.assist and g.mpc_ramp_factor() == 0.25 and g.lead_tau_cap() == 0.3
+    hold = int(cp.BRAKE_ASSIST_HOLD / g.dt)
+    for _ in range(hold - 1):
+      g.observe(26.8, lead(1.2, a_lead=0.0), 1.0)
+    assert g.assist
+    g.observe(26.8, lead(1.2, a_lead=0.0), 1.0)
+    assert not g.assist and g.mpc_ramp_factor() == 1.0 and g.lead_tau_cap() is None
+
+  def test_works_with_glide_off_and_needs_a_real_lead(self):
+    g = self.gov(brake_assist=True, glide=False, soft_plan=False, approach=False)
+    g.observe(26.8, lead(1.2, a_lead=-2.5), 1.0)
+    assert g.assist
+    g.reset()
+    assert not g.assist
+    g.observe(26.8, lead(1.2, a_lead=-2.5, prob=0.3), 1.0)
+    assert not g.assist
+
+  def test_safe_wrapper(self):
+    class Broken:
+      def mpc_ramp_factor(self):
+        raise RuntimeError
+      def lead_tau_cap(self):
+        raise RuntimeError
+      def reset(self):
+        pass
+    s = cp.SafeGlide(Broken())
+    assert s.mpc_ramp_factor() == 1.0 and s.failed
+    assert s.lead_tau_cap() is None
+    odd = cp.SafeGlide(SimpleNamespace(mpc_ramp_factor=lambda: 0.01, lead_tau_cap=lambda: 9.0))
+    assert odd.mpc_ramp_factor() == 1.0 and odd.lead_tau_cap() is None   # outside LIMITS: stock
+
+  def test_settings_clamped(self):
+    s = parse_settings({"brake_assist": True, "lead_brake_tau": 0.0, "brake_ramp": 5})
+    assert s.brake_assist and s.lead_brake_tau == cp.LIMITS["lead_brake_tau"][0] and s.brake_ramp == 1.0
+    assert parse_settings({"brake_assist": "off"}).brake_assist   # not a bool: the default (on)
+    assert not parse_settings({"brake_assist": False}).brake_assist
+
+  def test_mpc_lead_tau_cap(self, long_mpc_module):
+    m = long_mpc_module
+    mpc = SimpleNamespace(x0=np.array([0.0, 26.8, 0.0]), lead_tau_cap=None, extrapolate_lead=m.LongitudinalMpc.extrapolate_lead)
+    ld = SimpleNamespace(status=True, dRel=40.0, vLead=26.8, aLeadK=-3.0, aLeadTau=1.5)
+    stock = m.LongitudinalMpc.process_lead(mpc, ld)
+    mpc.lead_tau_cap = 0.3
+    capped = m.LongitudinalMpc.process_lead(mpc, ld)
+    assert capped[-1, 1] < stock[-1, 1] - 3   # expects the lead to keep braking: much slower at the horizon end
+    coasting = SimpleNamespace(status=True, dRel=40.0, vLead=26.8, aLeadK=-0.2, aLeadTau=1.5)
+    assert np.allclose(m.LongitudinalMpc.process_lead(mpc, coasting), m.LongitudinalMpc.process_lead(
+      SimpleNamespace(x0=mpc.x0, lead_tau_cap=None, extrapolate_lead=mpc.extrapolate_lead), coasting))   # not braking: untouched
+
+  def test_mpc_ramp_factor(self, long_mpc_module):
+    m = long_mpc_module
+    got = {}
+    mpc = SimpleNamespace(set_cost_weights=lambda w, c: got.setdefault("w", []).append(list(w)))
+    m.LongitudinalMpc.set_weights(mpc, personality=log_personality(), ramp_factor=1.0)
+    m.LongitudinalMpc.set_weights(mpc, personality=log_personality(), ramp_factor=0.5)
+    stock, fast = got["w"]
+    assert fast[4] == pytest.approx(stock[4] * 0.5) and fast[5] == pytest.approx(stock[5] * 0.5)   # accel change, jerk
+    assert fast[:4] == stock[:4]
+
+
+class TestPlannerShaping:
+  """The rebuilt planner formula: compiled constants (comfort brake, the shape of the distance cost) as runtime
+  parameters. Stock everywhere by default, and sent only to a solver built with them."""
+
+  def test_defaults_are_stock(self):
+    s = PersonalizedSettings()
+    assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == cp.MPC_SHAPING_STOCK
+    assert GlideGovernor(live=False, settings=s).mpc_shaping() == cp.MPC_SHAPING_STOCK
+
+  def test_assist_comfort_brake_only_while_assist_acts(self):
+    g = GlideGovernor(live=False, settings=PersonalizedSettings(assist_comfort_brake=1.5))
+    g.observe(26.8, lead(1.2, a_lead=-0.5), 1.0)
+    assert g.mpc_shaping() == cp.MPC_SHAPING_STOCK
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert g.assist and g.mpc_shaping() == (1.5, 0.0, 1.0, 1.0)
+    g = GlideGovernor(live=False, settings=PersonalizedSettings(assist_comfort_brake=2.5, mpc_comfort_brake=2.0))
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert g.mpc_shaping()[0] == 2.0   # never less cautious than without assist
+
+  def test_settings_clamped(self):
+    s = parse_settings({"mpc_comfort_brake": 0.5, "mpc_glide_band_s": 2.0, "mpc_glide_weight": 0.0, "mpc_far_weight": 5})
+    assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == (1.5, 0.5, 0.05, 1.0)
+
+  def test_safe_wrapper(self):
+    class Broken:
+      def mpc_shaping(self):
+        raise RuntimeError
+    s = cp.SafeGlide(Broken())
+    assert s.mpc_shaping() == cp.MPC_SHAPING_STOCK and s.failed
+    odd = cp.SafeGlide(SimpleNamespace(mpc_shaping=lambda: (1.0, 0.0, 1.0, 1.0)))
+    assert odd.mpc_shaping() == cp.MPC_SHAPING_STOCK and not odd.failed   # outside LIMITS: stock
+    short = cp.SafeGlide(SimpleNamespace(mpc_shaping=lambda: (2.0, 0.2)))
+    assert short.mpc_shaping() == cp.MPC_SHAPING_STOCK
+    ok = cp.SafeGlide(SimpleNamespace(mpc_shaping=lambda: (2.0, 0.2, 0.3, 0.5)))
+    assert ok.mpc_shaping() == (2.0, 0.2, 0.3, 0.5)
+
+  def test_stock_solver_gets_stock_shaping(self, long_mpc_module):
+    m = long_mpc_module
+    mpc = SimpleNamespace(param_dim=m.STOCK_PARAM_DIM, comfort_brake=1.5, close_band=0.3, band_weight=0.2, far_weight=0.5)
+    assert m.LongitudinalMpc.shaping(mpc) == (m.COMFORT_BRAKE, 0.0, 1.0, 1.0)
+    mpc.param_dim = m.PARAM_DIM
+    assert m.LongitudinalMpc.shaping(mpc) == (1.5, 0.3, 0.2, 0.5)
+
+  def test_cruise_stages_keep_stock_cost(self, long_mpc_module):
+    m = long_mpc_module
+    x_obstacles = np.array([[50., 80., 60.], [70., 65., 90.], [100., 120., 80.]])   # lead 0, lead 1, cruise closest
+    p = m.shaping_params(x_obstacles, 2.0, 0.3, 0.2, 0.5)
+    assert p.tolist() == [[2.0, 0.3, 0.2, 0.5], [2.0, 0.3, 0.2, 0.5], [2.0, 0.0, 1.0, 1.0]]
+    assert p.shape[1] == m.PARAM_DIM - m.STOCK_PARAM_DIM
+
+  def test_committed_solver_agrees_with_itself(self, long_mpc_module):
+    """The json, the C code and the casadi model function of the committed solver give the same np, and the planner
+    reads that np (on the comma from the library itself, elsewhere from the json)."""
+    import os
+    import re
+    m = long_mpc_module
+    gen = m.EXPORT_DIR
+    with open(m.JSON_FILE) as f:
+      np_json = json.load(f)["dims"]["np"]
+    with open(os.path.join(gen, "acados_solver_long.h")) as f:
+      np_h = int(re.search(r"#define LONG_NP\s+(\d+)", f.read()).group(1))
+    with open(os.path.join(gen, "acados_solver_long.c")) as f:
+      np_c = int(re.search(r"int casadi_np = (\d+);", f.read()).group(1))
+    with open(os.path.join(gen, "long_model", "long_expl_ode_fun.c")) as f:
+      model = f.read()
+    p_in = re.search(r"case 2: return (casadi_s\d+);", model).group(1)
+    np_model = int(re.search(p_in + r"\[\d+\] = \{(\d+),", model).group(1))
+    assert np_json == np_h == np_c == np_model
+    assert np_json in (m.STOCK_PARAM_DIM, m.PARAM_DIM)
+    assert m.solver_param_dim() == np_json
+
+  def test_param_dim_fallbacks(self, long_mpc_module, monkeypatch, tmp_path):
+    m = long_mpc_module
+    monkeypatch.setattr(m, "EXPORT_DIR", str(tmp_path))   # no library there
+    monkeypatch.setattr(m, "JSON_FILE", str(tmp_path / "acados_ocp_long.json"))
+    assert m.solver_param_dim() == m.STOCK_PARAM_DIM
+    (tmp_path / "acados_ocp_long.json").write_text(json.dumps({"dims": {"np": 10}}))
+    assert m.solver_param_dim() == 10
+
+  def test_shaped_cost(self, long_mpc_module):
+    pytest.importorskip("casadi")
+    m = long_mpc_module
+
+    def cost(err, close_band=0.0, band_weight=1.0, far_weight=1.0, v_ego=20.0):
+      return float(m.shaped_distance_cost(err, v_ego, close_band, band_weight, far_weight))
+    for err in (-2.0, -0.1, 0.0, 0.3):
+      assert cost(err) == pytest.approx(err)                                   # stock
+      assert cost(err, close_band=0.3) == pytest.approx(err)                   # a band at weight 1 is stock too
+    band = 0.3 * 20.0 / 30.0
+    assert cost(-0.1, close_band=0.3, band_weight=0.25) == pytest.approx(-0.05)   # inside the band: sqrt(weight)
+    assert cost(-band - 1e-9, 0.3, 0.25) == pytest.approx(cost(-band + 1e-9, 0.3, 0.25))   # continuous at its edge
+    assert cost(-0.5, 0.3, 0.25) - cost(-0.4, 0.3, 0.25) == pytest.approx(-0.1)   # full slope past the band
+    assert cost(0.4, far_weight=0.25) == pytest.approx(0.2)
+
+
+def log_personality():
+  from cereal import log
+  return log.LongitudinalPersonality.aggressive

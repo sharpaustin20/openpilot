@@ -220,6 +220,54 @@ Personal sunnypilot branch for one car:
      /data/camry_flags.json even after the drive itself is deleted. The
      parked learning job runs it on each batch of new drives.
 
+7. **Brake assist** (`selfdrive/controls/lib/camry_personalized.py`, `long_mpc.py`, `longitudinal_planner.py`,
+   Settings > Personalized > Brake Assist)
+   - In Personalized and Standard, while the radar lead brakes harder than
+     1.5 m/s² (radard's filtered estimate, lead probability over 0.5) and for
+     1 s after: the planner expects that braking to last (the lead's
+     `aLeadTau` capped at `lead_brake_tau` 0.3 s instead of radard's 1.5 s,
+     which assumes the braking fades) and ramps its own braking in faster
+     (its accel-change and jerk weights times `brake_ramp` 0.25). So it starts
+     braking sooner and needs less at the end. The -3.5 m/s² limit, FCW and
+     the stock emergency braking are unchanged. On by default; off (the
+     toggle, or `brake_assist` false) is the stock planner. Switching it off
+     applies mid-drive.
+   - Comma bench (2026-10-29, `follow_bench.py`, real-gap defaults): with
+     the bench's exact lead, it clears the three lead-stop tests item 4
+     fails (2.0 m/s² from 60 mph, 3.5 m/s² from 45 and 60 mph: 3.6-4.3 m
+     left, no FCW). Over the whole set, crashes go from 6 to 1 and FCW frames
+     from 549 to 157 (the car before PR #11: 3 and 255). With the lead
+     estimated the way radard does (`--lead radard`): 3.5 m/s² stops have no
+     FCW (5, 38 and 56 frames before). Over the set, FCW frames drop from 552 to
+     400. Crashes stay at 3, all lead stops at 5.0 m/s², which every
+     setting and the car before PR #11 also crash: that is past the
+     -3.5 m/s² limit. Glide, cut-ins and approaches are unchanged (it
+     doesn't act there). Of six settings benched, this one ("firm") is the
+     best that passes the strict gate (no new FCW frame anywhere) with both
+     lead models.
+   - Standard with the defaults (glide and brake assist) against the stock
+     planner: FCW frames 276 to 0 and crashes 3 to 0 with the exact lead,
+     340 to 198 and 2 to 1 with the radard-like lead; gate PASS. Relaxed
+     fewer warnings too (182 to 85 frames, radard lead), but there a lead
+     braking at 2.0 m/s² to a stop from 45 mph got -2.60 m/s² where the
+     stock planner stays above -2.5, which the gate fails, so Relaxed keeps
+     the stock reaction (`BRAKE_ASSIST_OFF_IN`); its stock gap is the
+     longest anyway.
+
+8. **Planner shaping, groundwork** (`long_mpc.py`, `tools/camry/build_long_solver.py`)
+   - The MPC formula takes four more runtime parameters in place of
+     compiled constants: the comfort brake its desired distance plans for
+     (stock 2.5 m/s²), and a piecewise-linear shape of the distance error (a
+     weight on a gap longer than desired, and a band under it the planner may
+     plan to coast through). Stock values give openpilot's cost exactly.
+   - The committed solver is still openpilot's (6 parameters). The planner
+     reads the parameter count from the solver library it loads and sends
+     the extra four only to a solver rebuilt from this formula, so until
+     then this changes nothing. `build_long_solver.py` rebuilds it in an
+     overlay under /tmp on the comma with the installed acados. That
+     rebuild, with stock values, benched identical to the installed solver
+     (2026-10-29).
+
 ## Updating
 
 This branch is pinned to v2026.002.002. To move to a newer sunnypilot

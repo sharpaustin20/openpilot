@@ -10,6 +10,10 @@
 #          --quick        only the glide-relevant scenarios
 #          --gate CURRENT CANDIDATE [--modes all]   full bench of two settings files, PASS/FAIL for the candidate
 #                                                   (used by suggest_long.py; --modes all adds Standard and Relaxed)
+#          --tunes NAME,NAME   only these tunes (comma separated, names as in TUNES / SETTINGS)
+#          --lead radard       the lead's accel and its decay estimated the way the car's radard does (Kalman filter on
+#                              the lead's speed, aLeadTau falling while it brakes); default: the Plant's exact accel with
+#                              a constant aLeadTau, as in openpilot's CI maneuvers
 import os
 import sys
 import time
@@ -50,17 +54,34 @@ TUNES = {
 # settings file (--table, --gate) are real: that is how the code under test reads the file.
 REAL = {"real 1.1 to 1.2"}
 # settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have both on)
-OFF = cp.PersonalizedSettings(glide=False, soft_plan=False, approach=False, overspeed_glide_mph=0.0)   # the plain planner
-GLIDE = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=False)
-SOFT = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=True)
+OFF = cp.PersonalizedSettings(glide=False, soft_plan=False, approach=False, overspeed_glide_mph=0.0, brake_assist=False)   # the plain planner
+GLIDE = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=False, brake_assist=False)
+SOFT = cp.PersonalizedSettings(personalized=True, glide=True, soft_plan=True, brake_assist=False)
 DEFAULTS = cp.PersonalizedSettings()   # what the car runs after the update with no settings file
+NO_ASSIST = replace(DEFAULTS, brake_assist=False)   # the defaults before brake assist was on (2026-10-29)
 PR8 = replace(SOFT, overspeed_glide_mph=0.0, approach=False)   # glide + soft plan as PR #8 behaves (no overspeed glide, no approach taper)
 SETTINGS = {
   "0.8 + glide":    (TUNES["0.8 to 35"], replace(GLIDE, overspeed_glide_mph=0.0, approach=False)),
   "0.8 + glide+soft": (TUNES["0.8 to 35"], PR8),
-  "0.8 + all":      (TUNES["0.8 to 35"], DEFAULTS),   # PR #8 plus glide over set speed and the approach taper (the defaults)
+  "0.8 + all":      (TUNES["0.8 to 35"], NO_ASSIST),   # PR #8 plus glide over set speed and the approach taper (the car before PR #11)
   "real + glide+soft": (TUNES["real 1.1 to 1.2"], PR8),   # the real-gap default with PR #8 behavior
   "real + all":     (TUNES["real 1.1 to 1.2"], DEFAULTS),  # what the car runs after this change, with no settings file
+  "real no assist": (TUNES["real 1.1 to 1.2"], NO_ASSIST),   # the car after PR #11
+  # brake assist (lead_brake_tau, brake_ramp) on top of the real-gap defaults; the defaults are "firm"
+  "real + assist":  (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.3, brake_ramp=0.5)),
+  "real + assist tau": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.3, brake_ramp=1.0)),
+  "real + assist ramp": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=1.5, brake_ramp=0.5)),
+  "real + assist max": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.1, brake_ramp=0.25)),
+  "real + assist quick": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.1, brake_ramp=0.5)),
+  "real + assist firm": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.3, brake_ramp=0.25)),
+  # planner shaping on top of the defaults: acts only with the rebuilt solver (tools/camry/build_long_solver.py), with
+  # the stock solver these run exactly like "real + all"
+  "shape brake 2.0": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, mpc_comfort_brake=2.0)),
+  "shape brake 1.5": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, mpc_comfort_brake=1.5)),
+  "shape band":     (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, mpc_glide_band_s=0.3, mpc_glide_weight=0.2)),
+  "shape far":      (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, mpc_far_weight=0.3)),
+  "assist brake 2.0": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, assist_comfort_brake=2.0)),   # only while brake assist acts
+  "assist brake 1.5": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, assist_comfort_brake=1.5)),
   "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
   "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
@@ -71,12 +92,16 @@ TUNES["standard"] = TUNES["stock 1.25"]
 TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
-REAL |= {"real + glide+soft", "real + all"}
+SHAPE = {"shape brake 2.0", "shape brake 1.5", "shape band", "shape far", "assist brake 2.0", "assist brake 1.5"}
+ASSIST = {"real + assist", "real + assist tau", "real + assist ramp", "real + assist max", "real + assist quick", "real + assist firm"}
+REAL |= {"real + glide+soft", "real + all", "real no assist"} | ASSIST | SHAPE
 # GLIDE CHECK: each glide tune against the same gaps without glide
 BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft",
            "real + glide+soft": "real 1.1 to 1.2", "real + all": "real + glide+soft", "standard + defaults": "standard",
+           "real no assist": "real + glide+soft", **dict.fromkeys(ASSIST, "real no assist"), **dict.fromkeys(SHAPE, "real + all"),
            "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
+LEAD_MODEL = sys.argv[sys.argv.index("--lead") + 1] if "--lead" in sys.argv else "ideal"
 CUR_PERSONALITY = [AGG]
 BRAKE_A = -0.4   # m/s^2, car decel counted as "braking" in the brake-time metric
 
@@ -150,7 +175,33 @@ def personalize(planner):
     FRAME_T[0] += time.perf_counter() - t0
     FRAME_T[1] += 1
   planner.update = timed_update
+  if LEAD_MODEL == "radard":
+    radard_leads(planner)   # outside the timing: radard is its own process on the car
   return planner
+
+
+def radard_leads(planner):
+  """--lead radard: before each planner update, replace the Plant's exact lead accel (and constant aLeadTau) with
+  what radard's Track estimates from the lead's speed: Kalman-filtered aLeadK, aLeadTau falling while it brakes."""
+  from openpilot.selfdrive.controls.radard import KalmanParams, Track
+  kalman = KalmanParams(DT)
+  tracks = {}
+  update = planner.update
+
+  def radard_update(sm):
+    rs = sm['radarState']
+    for name in ("leadOne", "leadTwo"):
+      lead = getattr(rs, name)
+      if not lead.status:
+        tracks.pop(name, None)
+        continue
+      t = tracks.get(name)
+      if t is None or abs(t.dRel - lead.dRel) > cp.CUT_IN_JUMP:   # a new car: a new track, as radard starts one
+        t = tracks[name] = Track(0, lead.vLead, kalman)
+      t.update(lead.dRel, lead.yRel, lead.vRel, lead.vLead, 1.0)
+      lead.vLeadK, lead.aLeadK, lead.aLeadTau = t.vLeadK, t.aLeadK, float(t.aLeadTau.x)
+    update(sm)
+  planner.update = radard_update
 
 
 CAR_MODE = os.environ.get("BENCH_CAR", "toyota")   # "honda" = the Plant's own CarParams, as in openpilot CI
@@ -239,7 +290,7 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   p = make_plant(v0, d0, e2e)
   p.v_lead_prev = v0
   settle = 40.0
-  rows, fcw, glide_s = [], 0, 0.0
+  rows, fcw, glide_s, assist_s = [], 0, 0.0, 0.0
   while p.current_time < settle + duration:
     t = p.current_time
     vl = float(lead_profile(t - settle)) if t >= settle else v0
@@ -249,6 +300,7 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
       rows.append((d, out["speed"], vl, out["acceleration"]))
       fcw += bool(out["fcw"])
       glide_s += DT * bool(getattr(getattr(p.planner, "glide", None), "active", False))
+      assist_s += DT * bool(getattr(getattr(p.planner, "glide", None), "assist", False))
   a = np.array(rows)
   d, v, vl, acc = a.T
   closing = vl - v
@@ -257,7 +309,7 @@ def run(lead_profile, v0, d0, duration, e2e=False, cruise_mph=80):
   return dict(gap_m=d[0], expect_m=expect, gap_s=d[0] / max(v[0], 0.1), min_gap_m=d.min(), min_ttc=ttc.min(),
               min_a=acc.min(), max_jerk=np.abs(np.diff(acc)).max() / DT, fcw=fcw, crash=bool(d.min() < 0.4),
               brake_s=float((acc < BRAKE_A).sum() * DT), glide_s=glide_s, end_gap_s=d[-1] / max(v[-1], 0.1),
-              min_gap_s=d.min() / max(v[0], 0.1), min_gap_tf=(d.min() - long_mpc.STOP_DISTANCE) / max(v[0], 0.1))
+              min_gap_s=d.min() / max(v[0], 0.1), min_gap_tf=(d.min() - long_mpc.STOP_DISTANCE) / max(v[0], 0.1), assist_s=assist_s)
 
 
 def scenarios():
@@ -500,6 +552,16 @@ def main():
   if "--table" in sys.argv:
     add_table_tune(sys.argv[sys.argv.index("--table") + 1])
   names = list(TUNES)
+  if "--tunes" in sys.argv:
+    wanted = sys.argv[sys.argv.index("--tunes") + 1].split(",")
+    unknown = [n for n in wanted if n not in TUNES]
+    if unknown:
+      sys.exit(f"unknown tunes {unknown}; known: {list(TUNES)}")
+    names = [n for n in names if n in wanted]
+  print(f"lead model: {LEAD_MODEL}")
+  solver = os.path.realpath(os.path.join(long_mpc.EXPORT_DIR, "libacados_ocp_solver_long.so"))
+  print(f"planner solver: {solver}, np {long_mpc.solver_param_dim()}" + ("" if long_mpc.solver_param_dim() >= long_mpc.PARAM_DIM
+                                                                          else " (stock: the shape tunes run as 'real + all')"))
   res = run_jobs(job_list(names, "--quick" in sys.argv), names)
   print("\nsteady gap at speed (m / s):")
   for mph in (30, 45, 60, 70):
@@ -516,7 +578,8 @@ def main():
     for n in names:
       m = res[n][k]
       ttc = f"{m['min_ttc']:.1f}" if "min_ttc" in m and np.isfinite(m["min_ttc"]) else "-"
-      print(f"    {n:14s} gap {m['min_gap_m']:5.1f}  ttc {ttc:>5s}  decel {m['min_a']:5.2f}  fcw {m['fcw']:3d}  crash {m['crash']}")
+      assist = f"  assist {m['assist_s']:4.1f} s" if m.get("assist_s") else ""
+      print(f"    {n:14s} gap {m['min_gap_m']:5.1f}  ttc {ttc:>5s}  decel {m['min_a']:5.2f}  fcw {m['fcw']:3d}  crash {m['crash']}{assist}")
   worst = {n: dict(min_a=min(m["min_a"] for m in res[n].values()), fcw=sum(m["fcw"] for m in res[n].values()),
                    crashes=sum(m["crash"] for m in res[n].values())) for n in names}
   print("\nsummary: " + " | ".join(f"{n}: hardest {w['min_a']:.2f}, FCW frames {w['fcw']}, crashes {w['crashes']}" for n, w in worst.items()))
@@ -532,7 +595,9 @@ def main():
     for n in names:
       m = res[n].get(k)
       if m:
-        print(f"    {n:16s} brake {m['brake_s']:5.1f} s  glide {m['glide_s']:5.1f} s  end gap {m['end_gap_s']:.2f}  min gap {m['min_gap_s']:.2f}")
+        assist = f"  assist {m['assist_s']:4.1f} s" if m.get("assist_s") else ""
+        print(f"    {n:16s} brake {m['brake_s']:5.1f} s  glide {m['glide_s']:5.1f} s  end gap {m['end_gap_s']:.2f}  min gap {m['min_gap_s']:.2f}"
+              + assist)
   print(f"\noverspeed scenarios (braking harder than {BRAKE_A:.1f} s / hardest decel / over the set speed s / back at it after s / glide s):")
   for k in OVERSPEED_TITLES:
     if k not in res[names[0]]:

@@ -65,6 +65,13 @@ MIN_GLIDE_SPEED = 5.0       # m/s (~11 mph), below this stop-and-go is left to t
 HARD_MIN_GAP_S = 0.6        # s, never glide closer than this, whatever the settings say
 RELEASE_S = 0.15            # s of gap below the light zone over which braking is handed back to the MPC
 LEAD_BRAKE_LIMIT = -1.0     # m/s^2, no glide while the lead itself brakes harder than this
+BRAKE_ASSIST_A = -1.5       # m/s^2, brake assist acts while the lead brakes harder than this (radard's filtered estimate)
+BRAKE_ASSIST_HOLD = 1.0     # s brake assist stays on after the lead's braking eases off
+# brake assist stays off in Relaxed (log.LongitudinalPersonality.relaxed): its stock gap is long, and on the 2026-10-29
+# bench (radard lead, lead braking 2.0 m/s2 from 45 mph to a stop) assist there braked at -2.60 m/s2 where the stock
+# planner stayed above -2.5, which the strict gate fails
+BRAKE_ASSIST_OFF_IN = (2, "relaxed")
+LEAD_BRAKING_A = -0.5       # m/s^2, a lead decelerating more than this counts as still braking (radard's own threshold)
 CLOSING_MIN = 0.3           # m/s, slower closing than this counts as not closing (TTC = inf)
 CUT_IN_JUMP = 4.0           # m, a lead distance jump this big in one frame is a different car
 STABLE_TIME = 1.0           # s the same lead must be seen before glide acts
@@ -81,7 +88,7 @@ STATE_WRITE_INTERVAL = 1.0     # s
 BAND_RELATIVE = "relative"  # zones measured from the profile's target gap
 BAND_FIXED = "fixed"        # zones at fixed gaps in seconds
 
-BOOLS = ("personalized", "glide", "soft_plan", "approach", "learn", "auto_apply")
+BOOLS = ("personalized", "glide", "soft_plan", "approach", "brake_assist", "learn", "auto_apply")
 
 
 @dataclass
@@ -103,6 +110,15 @@ class PersonalizedSettings:
   approach_decel: float = 0.5     # m/s^2, planned decel for closing in: lift off once arriving at the target gap needs this much
   soft_plan: bool = True
   soft_distance_factor: float = 0.3  # weight on holding the exact distance while in the glide band (1.0 = stock)
+  brake_assist: bool = True       # react sooner when the car ahead brakes hard (in every distance mode; bench 2026-10-29)
+  lead_brake_tau: float = 0.3     # brake assist: how fast the planner expects the lead's braking to fade (stock radar lead 1.5, vision lead 0.3)
+  brake_ramp: float = 0.25        # brake assist: scale on the planner's accel-change and jerk weights (1.0 = stock ramp)
+  assist_comfort_brake: float = 2.5  # brake assist: the planner's comfort brake while it acts (rebuilt solver only; 2.5 = stock)
+  # planner shaping (in every distance mode); acts only with the rebuilt planner solver, the defaults are stock
+  mpc_comfort_brake: float = 2.5  # m/s^2 the desired distance plans to brake with: lower = starts slowing earlier and gentler
+  mpc_glide_band_s: float = 0.0   # s under the target gap the planner itself plans to coast (0 = off)
+  mpc_glide_weight: float = 1.0   # weight on the gap error inside that band (1 = stock)
+  mpc_far_weight: float = 1.0     # weight on a gap longer than the target (lower = closes a big gap more gently)
   learn: bool = True              # run the learning job while parked (writes suggestions)
   auto_apply: bool = False        # let the learning job apply its suggestions itself (one step each, history kept)
 
@@ -120,7 +136,15 @@ LIMITS = {
   "overspeed_glide_mph": (0.0, 10.0),
   "approach_decel": (0.3, 1.0),
   "soft_distance_factor": (0.1, 1.0),
+  "lead_brake_tau": (0.1, 1.5),
+  "brake_ramp": (0.25, 1.0),
+  "mpc_comfort_brake": (1.5, 3.0),
+  "assist_comfort_brake": (1.5, 3.0),
+  "mpc_glide_band_s": (0.0, 0.5),
+  "mpc_glide_weight": (0.05, 1.0),
+  "mpc_far_weight": (0.1, 1.0),
 }
+MPC_SHAPING_STOCK = (2.5, 0.0, 1.0, 1.0)   # (comfort brake, glide band, glide weight, far weight): long_mpc's stock cost
 
 
 def _default_dir() -> str:
@@ -395,6 +419,11 @@ class GlideGovernor:
     self.reset()
 
   def reset(self):
+    self._reset_glide()
+    self._assist_frames = 0
+    self.assist = False
+
+  def _reset_glide(self):
     self._stable_frames = 0
     self._block_frames = 0
     self._last_d = None
@@ -413,7 +442,8 @@ class GlideGovernor:
       return None
 
   def refresh_settings(self, now: float | None = None):
-    """Mid-drive only switching glide or soft plan off is applied; everything else waits for the next drive."""
+    """Mid-drive only switching glide, soft plan, the approach taper or brake assist off is applied; everything else
+    waits for the next drive."""
     if not self.live:
       return
     now = time.monotonic() if now is None else now
@@ -425,20 +455,26 @@ class GlideGovernor:
       return
     self._mtime = mtime
     new = read_settings(self.path) if mtime is not None else PersonalizedSettings()
-    off = {k: False for k in ("glide", "soft_plan", "approach") if getattr(self.settings, k) and not getattr(new, k)}
+    off = {k: False for k in ("glide", "soft_plan", "approach", "brake_assist") if getattr(self.settings, k) and not getattr(new, k)}
     if off:
       self.settings = replace(self.settings, **off)
       cloudlog.info(f"camry personalized: switched off mid-drive: {list(off)}")
     self.pending_change = new != self.settings
 
-  def observe(self, v_ego: float, lead, t_follow: float):
-    """lead: radarState.leadOne; t_follow: the current distance mode's target gap. Tracks the lead and the
-    safety gates; decides if glide may act this cycle."""
+  def observe(self, v_ego: float, lead, t_follow: float, personality=None):
+    """lead: radarState.leadOne; t_follow: the current distance mode's target gap; personality: the distance mode
+    (selfdriveState.personality). Tracks the lead and the safety gates; decides if glide may act this cycle."""
     s = self.settings
     self._ready = False
     self.active = False
+    # brake assist: while the lead brakes hard, and BRAKE_ASSIST_HOLD after, the MPC expects that braking to last
+    # (lead_tau_cap) and may ramp its own braking up faster (mpc_ramp_factor)
+    braking = s.brake_assist and personality not in BRAKE_ASSIST_OFF_IN and str(personality) not in BRAKE_ASSIST_OFF_IN and \
+      lead.status and lead.modelProb > 0.5 and lead.aLeadK < BRAKE_ASSIST_A
+    self._assist_frames = int(BRAKE_ASSIST_HOLD / self.dt) if braking else max(0, self._assist_frames - 1)
+    self.assist = self._assist_frames > 0
     if not (s.glide or s.soft_plan or s.approach):
-      self.reset()
+      self._reset_glide()
       return
     self.t_follow = t_follow
 
@@ -500,6 +536,22 @@ class GlideGovernor:
       return s.soft_distance_factor + frac * (1.0 - s.soft_distance_factor)
     return 1.0
 
+  def mpc_ramp_factor(self) -> float:
+    """Brake assist: scale on the MPC's accel-change and jerk weights this cycle (1.0 = stock)."""
+    return self.settings.brake_ramp if self.assist else 1.0
+
+  def lead_tau_cap(self) -> float | None:
+    """Brake assist: the most the MPC may assume for the decay of a braking lead's decel (None = radard's value)."""
+    return self.settings.lead_brake_tau if self.assist else None
+
+  def mpc_shaping(self) -> tuple:
+    """(comfort brake, glide band s, glide weight, far weight) for the rebuilt planner solver. While brake assist acts
+    the comfort brake is at most assist_comfort_brake: the planner plans to start braking earlier for a hard-braking lead
+    without changing how it follows or closes in otherwise."""
+    s = self.settings
+    comfort_brake = min(s.mpc_comfort_brake, s.assist_comfort_brake) if self.assist else s.mpc_comfort_brake
+    return comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight
+
   def apply(self, a_target: float, source_is_lead: bool, accel_min: float) -> float:
     """Returns the adjusted accel target: the approach taper can only lower a positive acceleration request (never
     below 0), glide can only make a braking request less firm. Never adds throttle, never adds braking."""
@@ -560,8 +612,9 @@ class GlideGovernor:
 
 
 class SafeGlide:
-  """Fail-safe wrapper used by the planner: any exception in the governor is logged once, glide and soft plan
-  are then off for the rest of the drive, and the planner gets the plain MPC output (factor 1.0, a_target as is).
+  """Fail-safe wrapper used by the planner: any exception in the governor is logged once, glide, soft plan and brake
+  assist are then off for the rest of the drive, and the planner gets the plain MPC output (factors 1.0, no tau cap,
+  a_target as is).
   Attributes (settings, zone, active, ...) read through to the governor."""
   def __init__(self, governor):
     self.governor = governor
@@ -572,7 +625,7 @@ class SafeGlide:
 
   def _fail(self, where: str):
     if not self.failed:
-      cloudlog.exception(f"camry personalized: {where} failed, glide off for this drive")
+      cloudlog.exception(f"camry personalized: {where} failed, glide and brake assist off for this drive")
     self.failed = True
     try:
       self.governor.reset()
@@ -593,13 +646,49 @@ class SafeGlide:
     except Exception:
       self._fail("reset")
 
-  def observe(self, v_ego: float, lead, t_follow: float):
+  def observe(self, v_ego: float, lead, t_follow: float, personality=None):
     if self.failed:
       return
     try:
-      self.governor.observe(v_ego, lead, t_follow)
+      self.governor.observe(v_ego, lead, t_follow, personality)
     except Exception:
       self._fail("observe")
+
+  def mpc_ramp_factor(self) -> float:
+    if self.failed:
+      return 1.0
+    try:
+      f = float(self.governor.mpc_ramp_factor())
+      lo, hi = LIMITS["brake_ramp"]
+      return f if lo <= f <= hi else 1.0
+    except Exception:
+      self._fail("mpc_ramp_factor")
+      return 1.0
+
+  def lead_tau_cap(self) -> float | None:
+    if self.failed:
+      return None
+    try:
+      cap = self.governor.lead_tau_cap()
+      if cap is None:
+        return None
+      lo, hi = LIMITS["lead_brake_tau"]
+      return float(cap) if lo <= float(cap) <= hi else None
+    except Exception:
+      self._fail("lead_tau_cap")
+      return None
+
+  def mpc_shaping(self) -> tuple:
+    if self.failed:
+      return MPC_SHAPING_STOCK
+    try:
+      vals = tuple(float(v) for v in self.governor.mpc_shaping())
+      keys = ("mpc_comfort_brake", "mpc_glide_band_s", "mpc_glide_weight", "mpc_far_weight")
+      ok = len(vals) == len(keys) and all(LIMITS[k][0] <= v <= LIMITS[k][1] for k, v in zip(keys, vals, strict=False))
+      return vals if ok else MPC_SHAPING_STOCK
+    except Exception:
+      self._fail("mpc_shaping")
+      return MPC_SHAPING_STOCK
 
   def distance_cost_factor(self, source_is_lead: bool) -> float:
     if self.failed:

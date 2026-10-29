@@ -162,10 +162,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       except Exception:
         t_follow = 0.0
         self.glide._fail("get_T_FOLLOW")
-      self.glide.observe(v_ego, sm['radarState'].leadOne, t_follow)
+      self.glide.observe(v_ego, sm['radarState'].leadOne, t_follow, personality)
     obstacle_cost_factor = self.glide.distance_cost_factor(self.mpc.source == LongitudinalPlanSource.lead0)
 
-    self.mpc.set_weights(prev_accel_constraint, personality=personality, obstacle_cost_factor=obstacle_cost_factor)
+    self.mpc.lead_tau_cap = self.glide.lead_tau_cap()   # Camry brake assist (None and 1.0 unless the lead brakes hard)
+    # Camry planner shaping (stock values unless set; long_mpc uses them only with the rebuilt solver)
+    self.mpc.comfort_brake, self.mpc.close_band, self.mpc.band_weight, self.mpc.far_weight = self.glide.mpc_shaping()
+    self.mpc.set_weights(prev_accel_constraint, personality=personality, obstacle_cost_factor=obstacle_cost_factor,
+                         ramp_factor=self.glide.mpc_ramp_factor())
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
     self.mpc.update(sm['radarState'], v_cruise, personality=sm['selfdriveState'].personality)
 
