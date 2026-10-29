@@ -81,6 +81,10 @@ Personal sunnypilot branch for one car:
      (flat 1.25 s). Standard and Relaxed keep their stock gaps. Settings >
      Toggles > Driving Personality names the first position "Personalized"
      while the profile is on (it follows the wheel's distance button as before).
+     On the driving screen the current mode's name sits under the MAX box:
+     bright for 4 s after each press of the wheel's distance button and at
+     the start of a drive, dim otherwise
+     (`selfdrive/ui/sunnypilot/onroad/driving_mode.py`).
    - **Glide** (own toggle, on by default, in every distance mode): behind
      a lead in the same lane, small braking requests are raised to the
      car's coast decel while the gap is a little under the current mode's
