@@ -222,7 +222,7 @@ Personal sunnypilot branch for one car:
 
 7. **Brake assist** (`selfdrive/controls/lib/camry_personalized.py`, `long_mpc.py`, `longitudinal_planner.py`,
    Settings > Personalized > Brake Assist)
-   - In every distance mode, while the radar lead brakes harder than
+   - In Personalized and Standard, while the radar lead brakes harder than
      1.5 m/s² (radard's filtered estimate, lead probability over 0.5) and for
      1 s after: the planner expects that braking to last (the lead's
      `aLeadTau` capped at `lead_brake_tau` 0.3 s instead of radard's 1.5 s,
@@ -245,6 +245,14 @@ Personal sunnypilot branch for one car:
      doesn't act there). Of six settings benched, this one ("firm") is the
      best that passes the strict gate (no new FCW frame anywhere) with both
      lead models.
+   - Standard with the defaults (glide and brake assist) against the stock
+     planner: FCW frames 276 to 0 and crashes 3 to 0 with the exact lead,
+     340 to 198 and 2 to 1 with the radard-like lead; gate PASS. Relaxed
+     fewer warnings too (182 to 85 frames, radard lead), but there a lead
+     braking at 2.0 m/s² to a stop from 45 mph got -2.60 m/s² where the
+     stock planner stays above -2.5, which the gate fails, so Relaxed keeps
+     the stock reaction (`BRAKE_ASSIST_OFF_IN`); its stock gap is the
+     longest anyway.
 
 8. **Planner shaping, groundwork** (`long_mpc.py`, `tools/camry/build_long_solver.py`)
    - The MPC formula takes four more runtime parameters in place of

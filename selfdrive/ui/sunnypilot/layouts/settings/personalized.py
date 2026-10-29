@@ -167,7 +167,7 @@ class PersonalizedLayout(Widget):
        "instead of braking to win the gap back. The too-close penalty is unchanged. On by default; the learner tunes its " +
        "strength: firmer after brake takeovers inside the glide band, softer after an hour engaged without one."),
       ("brake_assist", "Brake Assist",
-       "In every distance mode: when the car ahead brakes hard (radar, harder than 1.5 m/s²), the planner expects that braking " +
+       "In Personalized and Standard: when the car ahead brakes hard (radar, harder than 1.5 m/s²), the planner expects that braking " +
        "to last instead of fading and ramps its own braking in faster, for a second after it eases. Starts braking sooner and " +
        "brakes less hard at the end; the -3.5 m/s² limit is unchanged. On by default; off = the stock planner's reaction."),
       ("learn", "Learn After Drives",

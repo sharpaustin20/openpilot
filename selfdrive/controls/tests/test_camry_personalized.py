@@ -553,6 +553,17 @@ class TestBrakeAssist:
     g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
     assert not g.assist and g.mpc_ramp_factor() == 1.0 and g.lead_tau_cap() is None   # off: the stock planner
 
+  def test_off_in_relaxed(self):
+    from cereal import log
+    for relaxed in (log.LongitudinalPersonality.relaxed, "relaxed"):
+      g = self.gov()
+      g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0, relaxed)
+      assert not g.assist and g.lead_tau_cap() is None
+    for mode in (log.LongitudinalPersonality.aggressive, log.LongitudinalPersonality.standard, None):
+      g = self.gov()
+      g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0, mode)
+      assert g.assist
+
   def test_switching_off_mid_drive_applies_right_away(self, tmp_path):
     path = str(tmp_path / "camry_long.json")
     write_settings(PersonalizedSettings(), path)

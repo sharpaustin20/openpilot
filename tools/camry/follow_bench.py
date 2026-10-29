@@ -66,7 +66,7 @@ SETTINGS = {
   "0.8 + all":      (TUNES["0.8 to 35"], NO_ASSIST),   # PR #8 plus glide over set speed and the approach taper (the car before PR #11)
   "real + glide+soft": (TUNES["real 1.1 to 1.2"], PR8),   # the real-gap default with PR #8 behavior
   "real + all":     (TUNES["real 1.1 to 1.2"], DEFAULTS),  # what the car runs after this change, with no settings file
-  "real, no assist": (TUNES["real 1.1 to 1.2"], NO_ASSIST),   # the car after PR #11
+  "real no assist": (TUNES["real 1.1 to 1.2"], NO_ASSIST),   # the car after PR #11
   # brake assist (lead_brake_tau, brake_ramp) on top of the real-gap defaults; the defaults are "firm"
   "real + assist":  (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.3, brake_ramp=0.5)),
   "real + assist tau": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.3, brake_ramp=1.0)),
@@ -94,11 +94,11 @@ for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
 SHAPE = {"shape brake 2.0", "shape brake 1.5", "shape band", "shape far", "assist brake 2.0", "assist brake 1.5"}
 ASSIST = {"real + assist", "real + assist tau", "real + assist ramp", "real + assist max", "real + assist quick", "real + assist firm"}
-REAL |= {"real + glide+soft", "real + all", "real, no assist"} | ASSIST | SHAPE
+REAL |= {"real + glide+soft", "real + all", "real no assist"} | ASSIST | SHAPE
 # GLIDE CHECK: each glide tune against the same gaps without glide
 BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft",
            "real + glide+soft": "real 1.1 to 1.2", "real + all": "real + glide+soft", "standard + defaults": "standard",
-           "real, no assist": "real + glide+soft", **dict.fromkeys(ASSIST, "real, no assist"), **dict.fromkeys(SHAPE, "real + all"),
+           "real no assist": "real + glide+soft", **dict.fromkeys(ASSIST, "real no assist"), **dict.fromkeys(SHAPE, "real + all"),
            "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
 LEAD_MODEL = sys.argv[sys.argv.index("--lead") + 1] if "--lead" in sys.argv else "ideal"

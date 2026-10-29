@@ -67,6 +67,10 @@ RELEASE_S = 0.15            # s of gap below the light zone over which braking i
 LEAD_BRAKE_LIMIT = -1.0     # m/s^2, no glide while the lead itself brakes harder than this
 BRAKE_ASSIST_A = -1.5       # m/s^2, brake assist acts while the lead brakes harder than this (radard's filtered estimate)
 BRAKE_ASSIST_HOLD = 1.0     # s brake assist stays on after the lead's braking eases off
+# brake assist stays off in Relaxed (log.LongitudinalPersonality.relaxed): its stock gap is long, and on the 2026-10-29
+# bench (radard lead, lead braking 2.0 m/s2 from 45 mph to a stop) assist there braked at -2.60 m/s2 where the stock
+# planner stayed above -2.5, which the strict gate fails
+BRAKE_ASSIST_OFF_IN = (2, "relaxed")
 LEAD_BRAKING_A = -0.5       # m/s^2, a lead decelerating more than this counts as still braking (radard's own threshold)
 CLOSING_MIN = 0.3           # m/s, slower closing than this counts as not closing (TTC = inf)
 CUT_IN_JUMP = 4.0           # m, a lead distance jump this big in one frame is a different car
@@ -457,15 +461,16 @@ class GlideGovernor:
       cloudlog.info(f"camry personalized: switched off mid-drive: {list(off)}")
     self.pending_change = new != self.settings
 
-  def observe(self, v_ego: float, lead, t_follow: float):
-    """lead: radarState.leadOne; t_follow: the current distance mode's target gap. Tracks the lead and the
-    safety gates; decides if glide may act this cycle."""
+  def observe(self, v_ego: float, lead, t_follow: float, personality=None):
+    """lead: radarState.leadOne; t_follow: the current distance mode's target gap; personality: the distance mode
+    (selfdriveState.personality). Tracks the lead and the safety gates; decides if glide may act this cycle."""
     s = self.settings
     self._ready = False
     self.active = False
     # brake assist: while the lead brakes hard, and BRAKE_ASSIST_HOLD after, the MPC expects that braking to last
     # (lead_tau_cap) and may ramp its own braking up faster (mpc_ramp_factor)
-    braking = s.brake_assist and lead.status and lead.modelProb > 0.5 and lead.aLeadK < BRAKE_ASSIST_A
+    braking = s.brake_assist and personality not in BRAKE_ASSIST_OFF_IN and str(personality) not in BRAKE_ASSIST_OFF_IN and \
+      lead.status and lead.modelProb > 0.5 and lead.aLeadK < BRAKE_ASSIST_A
     self._assist_frames = int(BRAKE_ASSIST_HOLD / self.dt) if braking else max(0, self._assist_frames - 1)
     self.assist = self._assist_frames > 0
     if not (s.glide or s.soft_plan or s.approach):
@@ -641,11 +646,11 @@ class SafeGlide:
     except Exception:
       self._fail("reset")
 
-  def observe(self, v_ego: float, lead, t_follow: float):
+  def observe(self, v_ego: float, lead, t_follow: float, personality=None):
     if self.failed:
       return
     try:
-      self.governor.observe(v_ego, lead, t_follow)
+      self.governor.observe(v_ego, lead, t_follow, personality)
     except Exception:
       self._fail("observe")
 
