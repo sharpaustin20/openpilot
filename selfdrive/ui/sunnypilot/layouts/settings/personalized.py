@@ -32,12 +32,15 @@ NUMBER_OPTIONS = {
   "overspeed_glide_mph": ([float(i) for i in range(11)], lambda v: "off" if v == 0 else f"{v:.0f} mph"),
   "approach_decel": ([round(0.3 + 0.1 * i, 1) for i in range(8)], lambda v: f"{v:.1f} m/s²"),
   "soft_distance_factor": ([round(0.1 * i, 1) for i in range(1, 11)], lambda v: f"{v:.1f}"),
+  "assist_comfort_brake": ([round(1.5 + 0.25 * i, 2) for i in range(7)], lambda v: f"{v:.2f} m/s²"),
+  "mpc_comfort_brake": ([round(1.5 + 0.25 * i, 2) for i in range(7)], lambda v: f"{v:.2f} m/s²"),
 }
 
 FIELD_NAMES = {
   "follow_s": "follow gap", "coast_margin_s": "coast zone starts", "light_width_s": "light-brake zone width",
   "light_brake": "light braking limit", "min_ttc_s": "glide only above TTC", "coast_accel": "coast decel",
   "soft_distance_factor": "soft plan strength", "overspeed_glide_mph": "glide over set speed", "approach_decel": "closing-in decel",
+  "assist_comfort_brake": "planned braking, car ahead braking hard", "mpc_comfort_brake": "planned braking",
 }
 
 
@@ -203,6 +206,13 @@ class PersonalizedLayout(Widget):
       self._toggles["soft_plan"],
       self._number("soft_distance_factor", "Soft Plan Strength", "Weight on holding the exact distance while in the glide band. 1.0 = stock, lower = softer."),
       self._toggles["brake_assist"],
+      self._number("assist_comfort_brake", "Planned Braking, Car Ahead Braking Hard",
+                   "While Brake Assist acts, the braking the planner plans its distance for. Lower starts braking earlier and " +
+                   "more gently; 2.5 m/s² is stock, 2.0 the default. Applies at the next drive."),
+      self._number("mpc_comfort_brake", "Planned Braking",
+                   "In every distance mode, the braking the planner plans its distance for. Lower slows earlier and more gently " +
+                   "behind slower cars but takes longer to settle in behind them; 2.5 m/s² is stock and the default. The gap " +
+                   "you follow at is unchanged. Applies at the next drive."),
       text_item(lambda: tr("Live"), self._live_text),
       self._toggles["learn"],
       text_item(lambda: tr("Interventions"), self._interventions_text,

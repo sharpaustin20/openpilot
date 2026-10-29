@@ -643,10 +643,15 @@ class TestPlannerShaping:
   """The rebuilt planner formula: compiled constants (comfort brake, the shape of the distance cost) as runtime
   parameters. Stock everywhere by default, and sent only to a solver built with them."""
 
-  def test_defaults_are_stock(self):
+  def test_defaults_are_stock_except_while_assist_acts(self):
     s = PersonalizedSettings()
     assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == cp.MPC_SHAPING_STOCK
-    assert GlideGovernor(live=False, settings=s).mpc_shaping() == cp.MPC_SHAPING_STOCK
+    assert s.assist_comfort_brake == 2.0
+    g = GlideGovernor(live=False, settings=s)
+    g.observe(26.8, lead(1.2, a_lead=-0.5), 1.0)
+    assert g.mpc_shaping() == cp.MPC_SHAPING_STOCK
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert g.mpc_shaping() == (2.0, 0.0, 1.0, 1.0)
 
   def test_assist_comfort_brake_only_while_assist_acts(self):
     g = GlideGovernor(live=False, settings=PersonalizedSettings(assist_comfort_brake=1.5))
