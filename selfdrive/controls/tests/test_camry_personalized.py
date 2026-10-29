@@ -525,8 +525,13 @@ def long_mpc_module(monkeypatch):
     def __getattr__(self, name):
       return object
   before = set(sys.modules)
-  for name in ("cereal.messaging", "openpilot.common.params_pyx", "casadi",
-               "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx"):
+  stubs = ["cereal.messaging", "openpilot.common.params_pyx",
+           "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx"]
+  try:
+    import casadi  # noqa: F401  (pip-installable: the shaped cost is then checked for real)
+  except ImportError:
+    stubs.append("casadi")
+  for name in stubs:
     monkeypatch.setitem(sys.modules, name, Stub(name))
   import importlib
   yield importlib.import_module("openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc")
@@ -608,6 +613,91 @@ class TestBrakeAssist:
     stock, fast = got["w"]
     assert fast[4] == pytest.approx(stock[4] * 0.5) and fast[5] == pytest.approx(stock[5] * 0.5)   # accel change, jerk
     assert fast[:4] == stock[:4]
+
+
+class TestPlannerShaping:
+  """The rebuilt planner formula: compiled constants (comfort brake, the shape of the distance cost) as runtime
+  parameters. Stock everywhere by default, and sent only to a solver built with them."""
+
+  def test_defaults_are_stock(self):
+    s = PersonalizedSettings()
+    assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == cp.MPC_SHAPING_STOCK
+    assert GlideGovernor(live=False, settings=s).mpc_shaping() == cp.MPC_SHAPING_STOCK
+
+  def test_settings_clamped(self):
+    s = parse_settings({"mpc_comfort_brake": 0.5, "mpc_glide_band_s": 2.0, "mpc_glide_weight": 0.0, "mpc_far_weight": 5})
+    assert (s.mpc_comfort_brake, s.mpc_glide_band_s, s.mpc_glide_weight, s.mpc_far_weight) == (1.5, 0.5, 0.05, 1.0)
+
+  def test_safe_wrapper(self):
+    class Broken:
+      def mpc_shaping(self):
+        raise RuntimeError
+    s = cp.SafeGlide(Broken())
+    assert s.mpc_shaping() == cp.MPC_SHAPING_STOCK and s.failed
+    odd = cp.SafeGlide(SimpleNamespace(mpc_shaping=lambda: (1.0, 0.0, 1.0, 1.0)))
+    assert odd.mpc_shaping() == cp.MPC_SHAPING_STOCK and not odd.failed   # outside LIMITS: stock
+    short = cp.SafeGlide(SimpleNamespace(mpc_shaping=lambda: (2.0, 0.2)))
+    assert short.mpc_shaping() == cp.MPC_SHAPING_STOCK
+    ok = cp.SafeGlide(SimpleNamespace(mpc_shaping=lambda: (2.0, 0.2, 0.3, 0.5)))
+    assert ok.mpc_shaping() == (2.0, 0.2, 0.3, 0.5)
+
+  def test_stock_solver_gets_stock_shaping(self, long_mpc_module):
+    m = long_mpc_module
+    mpc = SimpleNamespace(param_dim=m.STOCK_PARAM_DIM, comfort_brake=1.5, close_band=0.3, band_weight=0.2, far_weight=0.5)
+    assert m.LongitudinalMpc.shaping(mpc) == (m.COMFORT_BRAKE, 0.0, 1.0, 1.0)
+    mpc.param_dim = m.PARAM_DIM
+    assert m.LongitudinalMpc.shaping(mpc) == (1.5, 0.3, 0.2, 0.5)
+
+  def test_cruise_stages_keep_stock_cost(self, long_mpc_module):
+    m = long_mpc_module
+    x_obstacles = np.array([[50., 80., 60.], [70., 65., 90.], [100., 120., 80.]])   # lead 0, lead 1, cruise closest
+    p = m.shaping_params(x_obstacles, 2.0, 0.3, 0.2, 0.5)
+    assert p.tolist() == [[2.0, 0.3, 0.2, 0.5], [2.0, 0.3, 0.2, 0.5], [2.0, 0.0, 1.0, 1.0]]
+    assert p.shape[1] == m.PARAM_DIM - m.STOCK_PARAM_DIM
+
+  def test_committed_solver_agrees_with_itself(self, long_mpc_module):
+    """The json, the C code and the casadi model function of the committed solver give the same np, and the planner
+    reads that np (on the comma from the library itself, elsewhere from the json)."""
+    import os
+    import re
+    m = long_mpc_module
+    gen = m.EXPORT_DIR
+    with open(m.JSON_FILE) as f:
+      np_json = json.load(f)["dims"]["np"]
+    with open(os.path.join(gen, "acados_solver_long.h")) as f:
+      np_h = int(re.search(r"#define LONG_NP\s+(\d+)", f.read()).group(1))
+    with open(os.path.join(gen, "acados_solver_long.c")) as f:
+      np_c = int(re.search(r"int casadi_np = (\d+);", f.read()).group(1))
+    with open(os.path.join(gen, "long_model", "long_expl_ode_fun.c")) as f:
+      model = f.read()
+    p_in = re.search(r"case 2: return (casadi_s\d+);", model).group(1)
+    np_model = int(re.search(p_in + r"\[\d+\] = \{(\d+),", model).group(1))
+    assert np_json == np_h == np_c == np_model
+    assert np_json in (m.STOCK_PARAM_DIM, m.PARAM_DIM)
+    assert m.solver_param_dim() == np_json
+
+  def test_param_dim_fallbacks(self, long_mpc_module, monkeypatch, tmp_path):
+    m = long_mpc_module
+    monkeypatch.setattr(m, "EXPORT_DIR", str(tmp_path))   # no library there
+    monkeypatch.setattr(m, "JSON_FILE", str(tmp_path / "acados_ocp_long.json"))
+    assert m.solver_param_dim() == m.STOCK_PARAM_DIM
+    (tmp_path / "acados_ocp_long.json").write_text(json.dumps({"dims": {"np": 10}}))
+    assert m.solver_param_dim() == 10
+
+  def test_shaped_cost(self, long_mpc_module):
+    pytest.importorskip("casadi")
+    m = long_mpc_module
+
+    def cost(err, close_band=0.0, band_weight=1.0, far_weight=1.0, v_ego=20.0):
+      return float(m.shaped_distance_cost(err, v_ego, close_band, band_weight, far_weight))
+    for err in (-2.0, -0.1, 0.0, 0.3):
+      assert cost(err) == pytest.approx(err)                                   # stock
+      assert cost(err, close_band=0.3) == pytest.approx(err)                   # a band at weight 1 is stock too
+    band = 0.3 * 20.0 / 30.0
+    assert cost(-0.1, close_band=0.3, band_weight=0.25) == pytest.approx(-0.05)   # inside the band: sqrt(weight)
+    assert cost(-band - 1e-9, 0.3, 0.25) == pytest.approx(cost(-band + 1e-9, 0.3, 0.25))   # continuous at its edge
+    assert cost(-0.5, 0.3, 0.25) - cost(-0.4, 0.3, 0.25) == pytest.approx(-0.1)   # full slope past the band
+    assert cost(0.4, far_weight=0.25) == pytest.approx(0.2)
 
 
 def log_personality():

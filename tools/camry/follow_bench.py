@@ -70,6 +70,14 @@ SETTINGS = {
   "real + assist tau": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, brake_ramp=1.0)),
   "real + assist ramp": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=1.5)),
   "real + assist max": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.1, brake_ramp=0.25)),
+  "real + assist quick": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, lead_brake_tau=0.1)),
+  "real + assist firm": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, brake_ramp=0.25)),
+  # planner shaping on top of brake assist: acts only with the rebuilt solver (tools/camry/build_long_solver.py), with
+  # the stock solver these run exactly like "real + assist"
+  "shape brake 2.0": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, mpc_comfort_brake=2.0)),
+  "shape brake 1.5": (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, mpc_comfort_brake=1.5)),
+  "shape band":     (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, mpc_glide_band_s=0.3, mpc_glide_weight=0.2)),
+  "shape far":      (TUNES["real 1.1 to 1.2"], replace(DEFAULTS, brake_assist=True, mpc_far_weight=0.3)),
   "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
   "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
@@ -80,12 +88,15 @@ TUNES["standard"] = TUNES["stock 1.25"]
 TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
-REAL |= {"real + glide+soft", "real + all", "real + assist", "real + assist tau", "real + assist ramp", "real + assist max"}
+SHAPE = {"shape brake 2.0", "shape brake 1.5", "shape band", "shape far"}
+REAL |= {"real + glide+soft", "real + all", "real + assist", "real + assist tau", "real + assist ramp", "real + assist max",
+         "real + assist quick", "real + assist firm"} | SHAPE
 # GLIDE CHECK: each glide tune against the same gaps without glide
 BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft",
            "real + glide+soft": "real 1.1 to 1.2", "real + all": "real + glide+soft", "standard + defaults": "standard",
            "real + assist": "real + all", "real + assist tau": "real + all", "real + assist ramp": "real + all",
-           "real + assist max": "real + all",
+           "real + assist max": "real + all", "real + assist quick": "real + all", "real + assist firm": "real + all",
+           **dict.fromkeys(SHAPE, "real + assist"),
            "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
 LEAD_MODEL = sys.argv[sys.argv.index("--lead") + 1] if "--lead" in sys.argv else "ideal"
@@ -546,6 +557,9 @@ def main():
       sys.exit(f"unknown tunes {unknown}; known: {list(TUNES)}")
     names = [n for n in names if n in wanted]
   print(f"lead model: {LEAD_MODEL}")
+  solver = os.path.realpath(os.path.join(long_mpc.EXPORT_DIR, "libacados_ocp_solver_long.so"))
+  print(f"planner solver: {solver}, np {long_mpc.solver_param_dim()}" + ("" if long_mpc.solver_param_dim() >= long_mpc.PARAM_DIM
+                                                                          else " (stock: the shape tunes run as 'real + assist')"))
   res = run_jobs(job_list(names, "--quick" in sys.argv), names)
   print("\nsteady gap at speed (m / s):")
   for mph in (30, 45, 60, 70):

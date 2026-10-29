@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import ctypes
+import json
 import os
 import time
 import numpy as np
@@ -16,7 +18,7 @@ if __name__ == '__main__':  # generating code
 else:
   from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
 
-from casadi import SX, vertcat
+from casadi import SX, vertcat, if_else, sqrt
 
 MODEL_NAME = 'long'
 LONG_MPC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +30,8 @@ MPC_SOURCES = (LongitudinalPlanSource.lead0, LongitudinalPlanSource.lead1, Longi
 
 X_DIM = 3
 U_DIM = 1
-PARAM_DIM = 6
+PARAM_DIM = 10         # Camry: the stock 6 plus comfort brake and the shaped distance cost (see gen_long_ocp)
+STOCK_PARAM_DIM = 6
 COST_E_DIM = 5
 COST_DIM = COST_E_DIM + 1
 CONSTR_DIM = 4
@@ -91,11 +94,48 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, v_ego=0.0, pe
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
-def get_stopped_equivalence_factor(v_lead):
-  return (v_lead**2) / (2 * COMFORT_BRAKE)
+def get_stopped_equivalence_factor(v_lead, comfort_brake=COMFORT_BRAKE):
+  return (v_lead**2) / (2 * comfort_brake)
 
-def get_safe_obstacle_distance(v_ego, t_follow):
-  return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
+def get_safe_obstacle_distance(v_ego, t_follow, comfort_brake=COMFORT_BRAKE):
+  return (v_ego**2) / (2 * comfort_brake) + t_follow * v_ego + STOP_DISTANCE
+
+def solver_param_dim():
+  """np of the compiled solver next to this file: STOCK_PARAM_DIM for openpilot's formula, PARAM_DIM once the solver is
+  rebuilt from this file. The planner sends the extra parameters only when the solver has them (a solver given the
+  wrong number exits), so this file works with either solver. Read from the library the planner loads (the casadi
+  model function's parameter input), else from acados_ocp_long.json, which is generated together with it."""
+  try:
+    lib = ctypes.CDLL(os.path.join(EXPORT_DIR, "libacados_ocp_solver_long.so"))
+    sparsity_in = lib[f"{MODEL_NAME}_expl_ode_fun_sparsity_in"]
+    sparsity_in.restype = ctypes.POINTER(ctypes.c_int)   # casadi_int is int in the generated code
+    sparsity_in.argtypes = [ctypes.c_int]
+    return int(sparsity_in(2)[0])   # inputs x, u, p: rows of p
+  except Exception:
+    pass
+  try:
+    with open(JSON_FILE) as f:
+      return int(json.load(f)["dims"]["np"])
+  except Exception:
+    return STOCK_PARAM_DIM
+
+def shaped_distance_cost(dist_err, v_ego, close_band, band_weight, far_weight):
+  """Camry: the distance error shaped piecewise linear (continuous): far_weight on a gap longer than desired,
+  band_weight on a gap up to close_band seconds under it (plan to coast there instead of braking), full weight past
+  the band. far_weight = band_weight = 1 or close_band = 0 is the stock cost (weights act on the squared error)."""
+  band = close_band * v_ego / (v_ego + 10.)
+  return if_else(dist_err >= 0., sqrt(far_weight) * dist_err,
+                 if_else(dist_err >= -band, sqrt(band_weight) * dist_err, (dist_err + band) - sqrt(band_weight) * band))
+
+def shaping_params(x_obstacles, comfort_brake, close_band, band_weight, far_weight):
+  """Per-stage values of the 4 Camry parameters. The shaped distance cost is for following: stages where the cruise
+  obstacle (last column) is the closest keep the stock cost, so getting up to the set speed is unchanged. The comfort
+  brake is the same at every stage, since the obstacles it is compared between were all computed with it."""
+  lead_stage = np.argmin(x_obstacles, axis=1) < x_obstacles.shape[1] - 1
+  return np.column_stack([np.full(len(x_obstacles), comfort_brake),
+                          np.where(lead_stage, close_band, 0.0),
+                          np.where(lead_stage, band_weight, 1.0),
+                          np.where(lead_stage, far_weight, 1.0)])
 
 def gen_long_model():
   model = AcadosModel()
@@ -122,7 +162,13 @@ def gen_long_model():
   a_prev = SX.sym('a_prev')
   lead_t_follow = SX.sym('lead_t_follow')
   lead_danger_factor = SX.sym('lead_danger_factor')
-  model.p = vertcat(a_min, a_max, x_obstacle, a_prev, lead_t_follow, lead_danger_factor)
+  # Camry: compiled constants as runtime parameters, so the planner can be tuned without another rebuild
+  comfort_brake = SX.sym('comfort_brake')   # the braking the desired distance plans for (stock COMFORT_BRAKE)
+  close_band = SX.sym('close_band')         # s: a gap up to this much under the desired one costs band_weight (stock 0)
+  band_weight = SX.sym('band_weight')       # weight inside that band, 1 = stock
+  far_weight = SX.sym('far_weight')         # weight on a gap longer than desired, 1 = stock
+  model.p = vertcat(a_min, a_max, x_obstacle, a_prev, lead_t_follow, lead_danger_factor,
+                    comfort_brake, close_band, band_weight, far_weight)
 
   # dynamics model
   f_expl = vertcat(v_ego, a_ego, j_ego)
@@ -157,17 +203,20 @@ def gen_long_ocp():
   a_prev = ocp.model.p[3]
   lead_t_follow = ocp.model.p[4]
   lead_danger_factor = ocp.model.p[5]
+  comfort_brake, close_band, band_weight, far_weight = ocp.model.p[6], ocp.model.p[7], ocp.model.p[8], ocp.model.p[9]
 
   ocp.cost.yref = np.zeros((COST_DIM, ))
   ocp.cost.yref_e = np.zeros((COST_E_DIM, ))
 
-  desired_dist_comfort = get_safe_obstacle_distance(v_ego, lead_t_follow)
+  desired_dist_comfort = get_safe_obstacle_distance(v_ego, lead_t_follow, comfort_brake)
 
   # The main cost in normal operation is how close you are to the "desired" distance
   # from an obstacle at every timestep. This obstacle can be a lead car
   # or other object. In e2e mode we can use x_position targets as a cost
   # instead.
-  costs = [((x_obstacle - x_ego) - (desired_dist_comfort)) / (v_ego + 10.),
+  # Camry: shaped by the runtime parameters, see shaped_distance_cost
+  dist_err = ((x_obstacle - x_ego) - (desired_dist_comfort)) / (v_ego + 10.)
+  costs = [shaped_distance_cost(dist_err, v_ego, close_band, band_weight, far_weight),
            x_ego,
            v_ego,
            a_ego,
@@ -187,7 +236,7 @@ def gen_long_ocp():
 
   x0 = np.zeros(X_DIM)
   ocp.constraints.x0 = x0
-  ocp.parameter_values = np.array([-1.2, 1.2, 0.0, 0.0, get_T_FOLLOW(), LEAD_DANGER_FACTOR])
+  ocp.parameter_values = np.array([-1.2, 1.2, 0.0, 0.0, get_T_FOLLOW(), LEAD_DANGER_FACTOR, COMFORT_BRAKE, 0.0, 1.0, 1.0])
 
 
   # We put all constraint cost weights to 0 and only set them at runtime
@@ -228,6 +277,12 @@ class LongitudinalMpc:
   def __init__(self, dt=DT_MDL):
     self.dt = dt
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
+    self.param_dim = solver_param_dim()
+    # Camry planner shaping, set by the planner; they act only with a solver rebuilt from this file (param_dim)
+    self.comfort_brake = COMFORT_BRAKE
+    self.close_band = 0.0
+    self.band_weight = 1.0
+    self.far_weight = 1.0
     self.reset()
     self.source = LongitudinalPlanSource.cruise
     self.personalized = None  # Personalized follow table in the Aggressive slot, set by the planner once per drive
@@ -248,7 +303,7 @@ class LongitudinalMpc:
       self.solver.cost_set(i, "yref", self.yref[i])
     self.solver.cost_set(N, "yref", self.yref[N][:COST_E_DIM])
 
-    self.params = np.zeros((N+1, PARAM_DIM))
+    self.params = np.zeros((N+1, self.param_dim))
     for i in range(N+1):
       self.solver.set(i, 'x', np.zeros(X_DIM))
 
@@ -331,9 +386,16 @@ class LongitudinalMpc:
     lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
     return lead_xv
 
+  def shaping(self):
+    """(comfort brake, close band, band weight, far weight) in effect: stock unless the solver has the parameters."""
+    if self.param_dim < PARAM_DIM:
+      return COMFORT_BRAKE, 0.0, 1.0, 1.0
+    return self.comfort_brake, self.close_band, self.band_weight, self.far_weight
+
   def update(self, radarstate, v_cruise, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
     t_follow = get_T_FOLLOW(personality, v_ego, self.personalized)
+    comfort_brake, close_band, band_weight, far_weight = self.shaping()
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
     lead_xv_0 = self.process_lead(radarstate.leadOne)
@@ -342,8 +404,8 @@ class LongitudinalMpc:
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
-    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
-    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
+    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1], comfort_brake)
+    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1], comfort_brake)
 
     # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
     # when the leads are no factor.
@@ -351,7 +413,7 @@ class LongitudinalMpc:
     # TODO does this make sense when max_a is negative?
     v_upper = v_ego + (T_IDXS * CRUISE_MAX_ACCEL * 1.05)
     v_cruise_clipped = np.clip(v_cruise * np.ones(N+1), v_lower, v_upper)
-    cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
+    cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow, comfort_brake)
 
     x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
     self.source = MPC_SOURCES[np.argmin(x_obstacles[0])]
@@ -367,6 +429,8 @@ class LongitudinalMpc:
     self.params[:,3] = np.copy(self.a_prev)
     self.params[:,4] = t_follow
     self.params[:,5] = LEAD_DANGER_FACTOR
+    if self.param_dim >= PARAM_DIM:
+      self.params[:,6:PARAM_DIM] = shaping_params(x_obstacles, comfort_brake, close_band, band_weight, far_weight)
 
     self.run()
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
