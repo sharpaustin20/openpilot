@@ -2,6 +2,7 @@
 # For every drive, compares the model's predicted lead deceleration (modelV2.leadsV3[0].a) with the radar
 # Kalman deceleration the planner actually uses (radarState.leadOne.aLeadK), and prints:
 #   - real braking events (radar aLeadK < -1.0 m/s^2): how many the model caught, and how many seconds earlier
+#   - how much gas a 'no gas' cap would have cut in those early seconds
 #   - false alarms: model says "lead braking" but the radar never sees it within 3 s, per hour of following,
 #     and how many of those happened while sunnypilot was actually giving gas (the only time a "no gas" cap acts)
 # for several model thresholds, so the trigger can be chosen from real drives.
@@ -54,13 +55,14 @@ def extract_seg(args):
   if f is None:
     return route, s, [], ""
   from openpilot.tools.lib.logreader import LogReader
-  cur = dict(v=0.0, long=False, accel=0.0, lead=False, radar=False, alead=0.0, d=0.0)
+  cur = dict(v=0.0, aego=0.0, long=False, accel=0.0, lead=False, radar=False, alead=0.0, d=0.0)
   ticks = []
   try:
     for m in LogReader(f):
       w = m.which()
       if w == "carState":
         cur["v"] = m.carState.vEgo
+        cur["aego"] = m.carState.aEgo
       elif w == "carControl":
         cur["long"] = m.carControl.longActive
         cur["accel"] = m.carControl.actuators.accel
@@ -73,7 +75,7 @@ def extract_seg(args):
           continue
         a = list(ld[0].a)
         ticks.append((cur["v"], cur["long"], cur["accel"], cur["lead"], cur["radar"], cur["alead"], cur["d"],
-                      ld[0].prob, a[0] if a else 0.0, a[1] if len(a) > 1 else 0.0))
+                      ld[0].prob, a[0] if a else 0.0, a[1] if len(a) > 1 else 0.0, cur["aego"]))
   except Exception as e:
     return route, s, ticks, f"read error: {e}"
   return route, s, ticks, ""
@@ -95,7 +97,7 @@ def runs(flags, hold):
 
 
 def analyze(ticks):
-  V, LONG, ACC, LEAD, RADAR, ALEAD, D, PROB, A0, A1 = range(10)
+  V, LONG, ACC, LEAD, RADAR, ALEAD, D, PROB, A0, A1, AEGO = range(11)
   ok = [t[LEAD] and t[RADAR] and t[V] > MIN_SPEED and t[PROB] > 0.5 for t in ticks]
   follow_s = sum(ok) * TICK
   # radar braking events: first tick of each stretch with aLeadK < RADAR_BRAKE
@@ -106,21 +108,25 @@ def analyze(ticks):
       ev.append(i)
     prev = b
   look, conf = int(LOOKBACK_S / TICK), int(CONFIRM_S / TICK)
-  res = {"follow_s": round(follow_s, 1), "radar_events": len(ev), "signals": {}}
+  gas = lambda i: ticks[i][LONG] and ticks[i][ACC] > GAS_ACCEL
+  res = {"follow_s": round(follow_s, 1), "radar_events": len(ev), "signals": {},
+         "engaged_s": round(sum(1 for i in range(len(ticks)) if ok[i] and ticks[i][LONG]) * TICK, 1),
+         "gas_s": round(sum(1 for i in range(len(ticks)) if ok[i] and gas(i)) * TICK, 1)}
   for sig, col in (("a_now", A0), ("a_2s", A1)):
     for thr in THRESHOLDS:
       for hold_s in HOLDS_S:
         alarms = runs([ok[i] and t[col] < thr for i, t in enumerate(ticks)], int(hold_s / TICK))
-        lead_times, caught = [], 0
+        lead_times, caught, saved = [], 0, 0
         for e in ev:
           early = [a for a in alarms if e - look <= a <= e]
           if early:
             caught += 1
             lead_times.append((e - early[0]) * TICK)
+            saved += sum(1 for j in range(early[0], e) if gas(j))   # gas ticks a cap would have removed
         false = [a for a in alarms if not any(ticks[j][ALEAD] < RADAR_CONFIRM for j in range(a, min(len(ticks), a + conf)))]
-        false_gas = [a for a in false if ticks[a][LONG] and ticks[a][ACC] > GAS_ACCEL]
+        false_gas = [a for a in false if any(gas(j) for j in range(a, min(len(ticks), a + int(1.0 / TICK))))]   # gas within 1 s of the alarm
         res["signals"][f"{sig} {thr} hold {hold_s}"] = dict(alarms=len(alarms), caught=caught, lead_times=lead_times,
-                                                          false=len(false), false_gas=len(false_gas))
+                                                          false=len(false), false_gas=len(false_gas), saved_s=round(saved * TICK, 1))
   return res
 
 
@@ -158,30 +164,33 @@ def main():
           pool.terminate()
           break
 
-  total = dict(follow_s=0.0, radar_events=0, signals=defaultdict(lambda: dict(alarms=0, caught=0, lead_times=[], false=0, false_gas=0)))
+  total = dict(follow_s=0.0, radar_events=0, engaged_s=0.0, gas_s=0.0,
+               signals=defaultdict(lambda: dict(alarms=0, caught=0, lead_times=[], false=0, false_gas=0, saved_s=0.0)))
   per_route = {}
   for route in sorted(by_route):
     ticks = [t for s in sorted(by_route[route]) for t in by_route[route][s]]   # segments joined in order
     r = analyze(ticks)
     per_route[route] = r
     total["follow_s"] += r["follow_s"]
-    total["radar_events"] += r["radar_events"]
+    for f in ("radar_events", "engaged_s", "gas_s"):
+      total[f] += r[f]
     for k, v in r["signals"].items():
-      for f in ("alarms", "caught", "false", "false_gas"):
+      for f in ("alarms", "caught", "false", "false_gas", "saved_s"):
         total["signals"][k][f] += v[f]
       total["signals"][k]["lead_times"] += v["lead_times"]
 
   hrs = max(total["follow_s"] / 3600, 1e-6)
   print(f"following a radar lead: {total['follow_s'] / 60:.0f} min, radar braking events (< {RADAR_BRAKE} m/s^2): {total['radar_events']}")
-  print("signal / threshold / hold      caught  median-early  false/h  false-while-gas/h")
+  print(f"of that, long engaged {total['engaged_s'] / 60:.0f} min, giving gas (accel > {GAS_ACCEL}) {total['gas_s'] / 60:.1f} min")
+  print("signal / threshold / hold      caught  median-early  false/h  false-while-gas/h  gas-cut-early-s")
   summary = {}
   for k, v in total["signals"].items():
     lt = sorted(v["lead_times"])
     med = lt[len(lt) // 2] if lt else 0.0
     row = dict(caught=f"{v['caught']}/{total['radar_events']}", median_early_s=round(med, 2),
-               false_per_h=round(v["false"] / hrs, 1), false_gas_per_h=round(v["false_gas"] / hrs, 1))
+               false_per_h=round(v["false"] / hrs, 1), false_gas_per_h=round(v["false_gas"] / hrs, 1), saved_s=round(v["saved_s"], 1))
     summary[k] = row
-    print(f"{k:30s} {row['caught']:>7s}  {med:9.2f} s  {row['false_per_h']:7.1f}  {row['false_gas_per_h']:9.1f}")
+    print(f"{k:30s} {row['caught']:>7s}  {med:9.2f} s  {row['false_per_h']:7.1f}  {row['false_gas_per_h']:9.1f}  {row['saved_s']:9.1f}")
   for n in notes[:10]:
     print("note:", n)
   with open(args.out, "w") as f:
