@@ -39,7 +39,9 @@ TUNES = {
   "stock 1.25":     ([0], [1.25]),
   "PR7 1.0":        ([40, 60], [1.0, 1.45]),
   "0.8 to 35":      ([35, 40, 60], [0.8, 1.0, 1.45]),
-  "flat 1.1":       ([0], [1.1]),
+  "flat 1.1":       ([35, 40, 60], [1.1, 1.1, 1.1]),   # PR #9 as first proposed (crashes at 3.5 m/s2 from 60 mph)
+  "1.1 to 1.45":    ([35, 40, 60], [1.1, 1.1, 1.45]),  # the fallback that passed the gate (2026-10-28)
+  "1.1 to 1.2":     ([35, 40, 60], [1.1, 1.1, 1.2]),   # the PR #9 default table (three points, as the learner keeps them)
 }
 # settings per tune (glide/soft plan); tunes not listed run with both OFF (the file's defaults have both on)
 OFF = cp.PersonalizedSettings(glide=False, soft_plan=False, approach=False, overspeed_glide_mph=0.0)   # the plain planner
@@ -51,7 +53,8 @@ SETTINGS = {
   "0.8 + glide":    (TUNES["0.8 to 35"], replace(GLIDE, overspeed_glide_mph=0.0, approach=False)),
   "0.8 + glide+soft": (TUNES["0.8 to 35"], PR8),
   "0.8 + all":      (TUNES["0.8 to 35"], DEFAULTS),   # PR #8 plus glide over set speed and the approach taper (the defaults)
-  "1.1 + all":      (TUNES["flat 1.1"], DEFAULTS),
+  "1.1 + glide+soft": (TUNES["1.1 to 1.2"], PR8),      # PR #9 alone: its table with PR #8 behavior
+  "1.1 + all":      (TUNES["1.1 to 1.2"], DEFAULTS),   # PR #9 + PR #10: what the car runs after both, with no settings file
   "standard + defaults": (TUNES["stock 1.25"], DEFAULTS),   # table unused: Standard and Relaxed keep their stock gaps
   "relaxed + defaults":  (TUNES["stock 1.25"], DEFAULTS),
 }
@@ -63,8 +66,8 @@ TUNES["relaxed"] = TUNES["stock 1.25"]
 for _name, (_tune, _st) in SETTINGS.items():
   TUNES[_name] = _tune
 # GLIDE CHECK: each glide tune against the same gaps without glide
-BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft", "1.1 + all": "flat 1.1",
-           "standard + defaults": "standard",
+BASE_OF = {"0.8 + glide": "0.8 to 35", "0.8 + glide+soft": "0.8 to 35", "0.8 + all": "0.8 + glide+soft",
+           "1.1 + glide+soft": "1.1 to 1.2", "1.1 + all": "1.1 + glide+soft", "standard + defaults": "standard",
            "relaxed + defaults": "relaxed", "file": "0.8 to 35"}
 CUR_SETTINGS = [OFF]   # what make_planner gives the planner (per worker process)
 CUR_PERSONALITY = [AGG]

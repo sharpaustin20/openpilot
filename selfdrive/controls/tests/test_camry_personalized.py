@@ -170,7 +170,7 @@ class TestApplyRevert:
                        {"field": "min_ttc_s", "to": "x"}, {"field": "personalized", "to": False}]}
     new = cp.apply_suggested(sug, cur)
     assert new.follow_bp_mph == (35.0, 40.0, 60.0)
-    assert new.follow_s == (0.8, 1.1, 1.5)            # 0.8 floor, then at most +0.1 per point from the default table
+    assert new.follow_s == (1.0, 1.2, 1.3)            # at most 0.1 per point from the default table
     assert new.light_brake == -1.0 and new.coast_accel == -0.1 and new.min_ttc_s == 6.0 and new.personalized
 
   def test_apply_ignores_mismatched_breakpoints(self):
@@ -274,6 +274,25 @@ class TestSuggestionGate:
     offered, dropped, gate, _ = sl.gate_in_groups(self.CUR, self.CHANGES, self.FULL, lambda *a: {"verdict": "fail", "worse": ["x: crash"]})
     assert offered == [] and gate is self.FULL and [c["field"] for c in dropped] == ["coast_margin_s", "min_ttc_s", "follow_s"]
     assert all(c["dropped"] == "the bench showed: x: crash" for c in dropped)
+
+
+class TestFollowFloor:
+  """suggest_long.suggest_follow: the learner moves the 1.1 s town default, but never suggests closer than 1.0 s."""
+  GAS = {"gas_overrides": [{"mph": 25, "gap_s": 0.9, "vrel": 0.0, "same_lead": True}] * 6}
+
+  def test_default_table(self):
+    assert cp.DEFAULT_FOLLOW_BP_MPH == (35.0, 40.0, 60.0) and cp.DEFAULT_FOLLOW_S == (1.1, 1.1, 1.2)
+
+  def test_gas_presses_stop_at_the_floor(self):
+    from openpilot.tools.camry import suggest_long as sl
+    ch = sl.suggest_follow(self.GAS, PersonalizedSettings())
+    assert ch["to"] == [1.0, 1.1, 1.2] and ch["from"] == [1.1, 1.1, 1.2]
+    assert sl.suggest_follow(self.GAS, PersonalizedSettings(follow_bp_mph=(35.0, 40.0, 60.0), follow_s=(1.0, 1.1, 1.2))) is None
+
+  def test_below_the_floor_is_raised(self):
+    from openpilot.tools.camry import suggest_long as sl
+    ch = sl.suggest_follow({}, PersonalizedSettings(follow_bp_mph=(35.0, 40.0, 60.0), follow_s=(0.8, 1.0, 1.45)))
+    assert ch["to"] == [1.0, 1.0, 1.45] and "floor" in ch["why"]
 
 
 class TestOverspeed:
