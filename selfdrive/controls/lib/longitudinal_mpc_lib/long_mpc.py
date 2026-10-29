@@ -231,6 +231,7 @@ class LongitudinalMpc:
     self.reset()
     self.source = LongitudinalPlanSource.cruise
     self.personalized = None  # Personalized follow table in the Aggressive slot, set by the planner once per drive
+    self.lead_tau_cap = None  # Camry brake assist: cap on a braking lead's aLeadTau, set by the planner each cycle
 
   def reset(self):
     self.solver.reset()
@@ -279,9 +280,11 @@ class LongitudinalMpc:
     for i in range(N):
       self.solver.cost_set(i, 'Zl', Zl)
 
-  def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard, obstacle_cost_factor=1.0):
+  def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard, obstacle_cost_factor=1.0,
+                  ramp_factor=1.0):
     # obstacle_cost_factor < 1: care less about holding the exact distance (Camry Personalized soft plan)
-    jerk_factor = get_jerk_factor(personality)
+    # ramp_factor < 1: let the plan's accel change faster (Camry brake assist, while the lead brakes hard)
+    jerk_factor = get_jerk_factor(personality) * ramp_factor
     a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
     cost_weights = [obstacle_cost_factor * X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
     constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
@@ -310,6 +313,8 @@ class LongitudinalMpc:
       v_lead = lead.vLead
       a_lead = lead.aLeadK
       a_lead_tau = lead.aLeadTau
+      if self.lead_tau_cap is not None and a_lead < camry_personalized.LEAD_BRAKING_A:
+        a_lead_tau = min(a_lead_tau, self.lead_tau_cap)   # Camry brake assist: expect the lead to keep braking
     else:
       # Fake a fast lead car, so mpc can keep running in the same mode
       x_lead = 50.0

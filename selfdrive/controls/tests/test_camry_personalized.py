@@ -506,3 +506,110 @@ class TestModeName:
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
     assert cp.mode_name("aggressive", str(bad)) == "Personalized"
+
+
+@pytest.fixture
+def long_mpc_module(monkeypatch):
+  """long_mpc for unit tests of its Python side. Where the compiled solver or msgq isn't built (cloud), they are
+  stubbed for the import and the stubbed modules are dropped again afterwards."""
+  import sys
+  import types
+  try:
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib import long_mpc
+    yield long_mpc
+    return
+  except ImportError:
+    pass
+
+  class Stub(types.ModuleType):
+    def __getattr__(self, name):
+      return object
+  before = set(sys.modules)
+  for name in ("cereal.messaging", "openpilot.common.params_pyx", "casadi",
+               "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx"):
+    monkeypatch.setitem(sys.modules, name, Stub(name))
+  import importlib
+  yield importlib.import_module("openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc")
+  for name in set(sys.modules) - before:   # nothing imported against the stubs outlives the test
+    sys.modules.pop(name, None)
+
+
+class TestBrakeAssist:
+  """React sooner when the car ahead brakes hard: the MPC expects the lead's braking to last (aLeadTau capped) and may
+  ramp its own braking faster (lower accel-change and jerk weights). Off by default; fails safe to stock."""
+
+  def gov(self, **kw):
+    return GlideGovernor(live=False, settings=PersonalizedSettings(**kw))
+
+  def test_off_by_default(self):
+    g = self.gov()
+    g.observe(26.8, lead(1.2, a_lead=-3.0), 1.0)
+    assert not g.assist and g.mpc_ramp_factor() == 1.0 and g.lead_tau_cap() is None
+
+  def test_on_while_lead_brakes_hard_then_holds(self):
+    g = self.gov(brake_assist=True)
+    g.observe(26.8, lead(1.2, a_lead=-1.0), 1.0)
+    assert not g.assist   # ordinary slowing ahead: stock planner
+    g.observe(26.8, lead(1.2, a_lead=-2.0), 1.0)
+    assert g.assist and g.mpc_ramp_factor() == 0.5 and g.lead_tau_cap() == 0.3
+    hold = int(cp.BRAKE_ASSIST_HOLD / g.dt)
+    for _ in range(hold - 1):
+      g.observe(26.8, lead(1.2, a_lead=0.0), 1.0)
+    assert g.assist
+    g.observe(26.8, lead(1.2, a_lead=0.0), 1.0)
+    assert not g.assist and g.mpc_ramp_factor() == 1.0 and g.lead_tau_cap() is None
+
+  def test_works_with_glide_off_and_needs_a_real_lead(self):
+    g = self.gov(brake_assist=True, glide=False, soft_plan=False, approach=False)
+    g.observe(26.8, lead(1.2, a_lead=-2.5), 1.0)
+    assert g.assist
+    g.reset()
+    assert not g.assist
+    g.observe(26.8, lead(1.2, a_lead=-2.5, prob=0.3), 1.0)
+    assert not g.assist
+
+  def test_safe_wrapper(self):
+    class Broken:
+      def mpc_ramp_factor(self):
+        raise RuntimeError
+      def lead_tau_cap(self):
+        raise RuntimeError
+      def reset(self):
+        pass
+    s = cp.SafeGlide(Broken())
+    assert s.mpc_ramp_factor() == 1.0 and s.failed
+    assert s.lead_tau_cap() is None
+    odd = cp.SafeGlide(SimpleNamespace(mpc_ramp_factor=lambda: 0.01, lead_tau_cap=lambda: 9.0))
+    assert odd.mpc_ramp_factor() == 1.0 and odd.lead_tau_cap() is None   # outside LIMITS: stock
+
+  def test_settings_clamped(self):
+    s = parse_settings({"brake_assist": True, "lead_brake_tau": 0.0, "brake_ramp": 5})
+    assert s.brake_assist and s.lead_brake_tau == cp.LIMITS["lead_brake_tau"][0] and s.brake_ramp == 1.0
+    assert not parse_settings({"brake_assist": "yes"}).brake_assist
+
+  def test_mpc_lead_tau_cap(self, long_mpc_module):
+    m = long_mpc_module
+    mpc = SimpleNamespace(x0=np.array([0.0, 26.8, 0.0]), lead_tau_cap=None, extrapolate_lead=m.LongitudinalMpc.extrapolate_lead)
+    ld = SimpleNamespace(status=True, dRel=40.0, vLead=26.8, aLeadK=-3.0, aLeadTau=1.5)
+    stock = m.LongitudinalMpc.process_lead(mpc, ld)
+    mpc.lead_tau_cap = 0.3
+    capped = m.LongitudinalMpc.process_lead(mpc, ld)
+    assert capped[-1, 1] < stock[-1, 1] - 3   # expects the lead to keep braking: much slower at the horizon end
+    coasting = SimpleNamespace(status=True, dRel=40.0, vLead=26.8, aLeadK=-0.2, aLeadTau=1.5)
+    assert np.allclose(m.LongitudinalMpc.process_lead(mpc, coasting), m.LongitudinalMpc.process_lead(
+      SimpleNamespace(x0=mpc.x0, lead_tau_cap=None, extrapolate_lead=mpc.extrapolate_lead), coasting))   # not braking: untouched
+
+  def test_mpc_ramp_factor(self, long_mpc_module):
+    m = long_mpc_module
+    got = {}
+    mpc = SimpleNamespace(set_cost_weights=lambda w, c: got.setdefault("w", []).append(list(w)))
+    m.LongitudinalMpc.set_weights(mpc, personality=log_personality(), ramp_factor=1.0)
+    m.LongitudinalMpc.set_weights(mpc, personality=log_personality(), ramp_factor=0.5)
+    stock, fast = got["w"]
+    assert fast[4] == pytest.approx(stock[4] * 0.5) and fast[5] == pytest.approx(stock[5] * 0.5)   # accel change, jerk
+    assert fast[:4] == stock[:4]
+
+
+def log_personality():
+  from cereal import log
+  return log.LongitudinalPersonality.aggressive

@@ -65,6 +65,9 @@ MIN_GLIDE_SPEED = 5.0       # m/s (~11 mph), below this stop-and-go is left to t
 HARD_MIN_GAP_S = 0.6        # s, never glide closer than this, whatever the settings say
 RELEASE_S = 0.15            # s of gap below the light zone over which braking is handed back to the MPC
 LEAD_BRAKE_LIMIT = -1.0     # m/s^2, no glide while the lead itself brakes harder than this
+BRAKE_ASSIST_A = -1.5       # m/s^2, brake assist acts while the lead brakes harder than this (radard's filtered estimate)
+BRAKE_ASSIST_HOLD = 1.0     # s brake assist stays on after the lead's braking eases off
+LEAD_BRAKING_A = -0.5       # m/s^2, a lead decelerating more than this counts as still braking (radard's own threshold)
 CLOSING_MIN = 0.3           # m/s, slower closing than this counts as not closing (TTC = inf)
 CUT_IN_JUMP = 4.0           # m, a lead distance jump this big in one frame is a different car
 STABLE_TIME = 1.0           # s the same lead must be seen before glide acts
@@ -81,7 +84,7 @@ STATE_WRITE_INTERVAL = 1.0     # s
 BAND_RELATIVE = "relative"  # zones measured from the profile's target gap
 BAND_FIXED = "fixed"        # zones at fixed gaps in seconds
 
-BOOLS = ("personalized", "glide", "soft_plan", "approach", "learn", "auto_apply")
+BOOLS = ("personalized", "glide", "soft_plan", "approach", "brake_assist", "learn", "auto_apply")
 
 
 @dataclass
@@ -103,6 +106,9 @@ class PersonalizedSettings:
   approach_decel: float = 0.5     # m/s^2, planned decel for closing in: lift off once arriving at the target gap needs this much
   soft_plan: bool = True
   soft_distance_factor: float = 0.3  # weight on holding the exact distance while in the glide band (1.0 = stock)
+  brake_assist: bool = False      # react sooner when the car ahead brakes hard (in every distance mode)
+  lead_brake_tau: float = 0.3     # brake assist: how fast the planner expects the lead's braking to fade (stock radar lead 1.5, vision lead 0.3)
+  brake_ramp: float = 0.5         # brake assist: scale on the planner's accel-change and jerk weights (1.0 = stock ramp)
   learn: bool = True              # run the learning job while parked (writes suggestions)
   auto_apply: bool = False        # let the learning job apply its suggestions itself (one step each, history kept)
 
@@ -120,6 +126,8 @@ LIMITS = {
   "overspeed_glide_mph": (0.0, 10.0),
   "approach_decel": (0.3, 1.0),
   "soft_distance_factor": (0.1, 1.0),
+  "lead_brake_tau": (0.1, 1.5),
+  "brake_ramp": (0.25, 1.0),
 }
 
 
@@ -395,6 +403,11 @@ class GlideGovernor:
     self.reset()
 
   def reset(self):
+    self._reset_glide()
+    self._assist_frames = 0
+    self.assist = False
+
+  def _reset_glide(self):
     self._stable_frames = 0
     self._block_frames = 0
     self._last_d = None
@@ -437,8 +450,13 @@ class GlideGovernor:
     s = self.settings
     self._ready = False
     self.active = False
+    # brake assist: while the lead brakes hard, and BRAKE_ASSIST_HOLD after, the MPC expects that braking to last
+    # (lead_tau_cap) and may ramp its own braking up faster (mpc_ramp_factor)
+    braking = s.brake_assist and lead.status and lead.modelProb > 0.5 and lead.aLeadK < BRAKE_ASSIST_A
+    self._assist_frames = int(BRAKE_ASSIST_HOLD / self.dt) if braking else max(0, self._assist_frames - 1)
+    self.assist = self._assist_frames > 0
     if not (s.glide or s.soft_plan or s.approach):
-      self.reset()
+      self._reset_glide()
       return
     self.t_follow = t_follow
 
@@ -500,6 +518,14 @@ class GlideGovernor:
       return s.soft_distance_factor + frac * (1.0 - s.soft_distance_factor)
     return 1.0
 
+  def mpc_ramp_factor(self) -> float:
+    """Brake assist: scale on the MPC's accel-change and jerk weights this cycle (1.0 = stock)."""
+    return self.settings.brake_ramp if self.assist else 1.0
+
+  def lead_tau_cap(self) -> float | None:
+    """Brake assist: the most the MPC may assume for the decay of a braking lead's decel (None = radard's value)."""
+    return self.settings.lead_brake_tau if self.assist else None
+
   def apply(self, a_target: float, source_is_lead: bool, accel_min: float) -> float:
     """Returns the adjusted accel target: the approach taper can only lower a positive acceleration request (never
     below 0), glide can only make a braking request less firm. Never adds throttle, never adds braking."""
@@ -560,8 +586,9 @@ class GlideGovernor:
 
 
 class SafeGlide:
-  """Fail-safe wrapper used by the planner: any exception in the governor is logged once, glide and soft plan
-  are then off for the rest of the drive, and the planner gets the plain MPC output (factor 1.0, a_target as is).
+  """Fail-safe wrapper used by the planner: any exception in the governor is logged once, glide, soft plan and brake
+  assist are then off for the rest of the drive, and the planner gets the plain MPC output (factors 1.0, no tau cap,
+  a_target as is).
   Attributes (settings, zone, active, ...) read through to the governor."""
   def __init__(self, governor):
     self.governor = governor
@@ -572,7 +599,7 @@ class SafeGlide:
 
   def _fail(self, where: str):
     if not self.failed:
-      cloudlog.exception(f"camry personalized: {where} failed, glide off for this drive")
+      cloudlog.exception(f"camry personalized: {where} failed, glide and brake assist off for this drive")
     self.failed = True
     try:
       self.governor.reset()
@@ -600,6 +627,30 @@ class SafeGlide:
       self.governor.observe(v_ego, lead, t_follow)
     except Exception:
       self._fail("observe")
+
+  def mpc_ramp_factor(self) -> float:
+    if self.failed:
+      return 1.0
+    try:
+      f = float(self.governor.mpc_ramp_factor())
+      lo, hi = LIMITS["brake_ramp"]
+      return f if lo <= f <= hi else 1.0
+    except Exception:
+      self._fail("mpc_ramp_factor")
+      return 1.0
+
+  def lead_tau_cap(self) -> float | None:
+    if self.failed:
+      return None
+    try:
+      cap = self.governor.lead_tau_cap()
+      if cap is None:
+        return None
+      lo, hi = LIMITS["lead_brake_tau"]
+      return float(cap) if lo <= float(cap) <= hi else None
+    except Exception:
+      self._fail("lead_tau_cap")
+      return None
 
   def distance_cost_factor(self, source_is_lead: bool) -> float:
     if self.failed:
